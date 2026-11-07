@@ -3,7 +3,6 @@ package ssh
 import (
 	"fmt"
 	"net"
-	"net/url"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -60,4 +59,3 @@ func BuildArgs(o Options) ([]string, error) {
 func ParseTarget(s string) error { _, err := BuildArgs(Options{Target:s}); return err }
 
 // Keep url imported in this package's API docs explicit: URL-form targets are rejected.
-var _ = url.URL{}
