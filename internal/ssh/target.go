@@ -22,7 +22,7 @@ type Options struct {
 // not invoke a shell and never disables SSH host-key verification.
 func BuildArgs(o Options) ([]string, error) {
 	target := strings.TrimSpace(o.Target)
-	if target == "" || strings.ContainsAny(target, "\\r\\n\\x00") || strings.Contains(target, " ") {
+	if target == "" || strings.ContainsAny(target, "`r`n`0") || strings.Contains(target, " ") {
 		return nil, fmt.Errorf("target must be user@host[:port]")
 	}
 	parts := strings.Split(target, "@")
@@ -34,28 +34,60 @@ func BuildArgs(o Options) ([]string, error) {
 	port := o.Port
 	if strings.HasPrefix(hostPort, "[") {
 		h, p, err := net.SplitHostPort(hostPort)
-		if err == nil { host = h; parsed, e := strconv.Atoi(p); if e != nil { return nil, fmt.Errorf("invalid port") }; if port != 0 && port != parsed { return nil, fmt.Errorf("conflicting ports") }; port = parsed } else if strings.HasSuffix(hostPort, "]") { host = strings.Trim(hostPort, "[]") } else { return nil, fmt.Errorf("invalid bracketed IPv6 target") }
+		if err == nil {
+			host = h
+			parsed, e := strconv.Atoi(p)
+			if e != nil {
+				return nil, fmt.Errorf("invalid port")
+			}
+			if port != 0 && port != parsed {
+				return nil, fmt.Errorf("conflicting ports")
+			}
+			port = parsed
+		} else if strings.HasSuffix(hostPort, "]") {
+			host = strings.Trim(hostPort, "[]")
+		} else {
+			return nil, fmt.Errorf("invalid bracketed IPv6 target")
+		}
 	} else if strings.Count(hostPort, ":") == 1 {
 		h, p, err := net.SplitHostPort(hostPort)
-		if err != nil { return nil, fmt.Errorf("invalid host:port") }
-		host = h; parsed, err := strconv.Atoi(p); if err != nil { return nil, fmt.Errorf("invalid port") }; if port != 0 && port != parsed { return nil, fmt.Errorf("conflicting ports") }; port = parsed
+		if err != nil {
+			return nil, fmt.Errorf("invalid host:port")
+		}
+		host = h
+		parsed, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid port")
+		}
+		if port != 0 && port != parsed {
+			return nil, fmt.Errorf("conflicting ports")
+		}
+		port = parsed
 	}
-	if host == "" || strings.ContainsAny(host, "\\r\\n\\x00/\\\\") || strings.Contains(host, "@") || strings.HasPrefix(host, "-") {
+	if host == "" || !regexp.MustCompile(`^[a-zA-Z0-9.:-]+$`).MatchString(host) || strings.Contains(host, "@") || strings.HasPrefix(host, "-") {
 		return nil, fmt.Errorf("invalid host")
 	}
-	if strings.Contains(host, "%") { return nil, fmt.Errorf("IPv6 zone identifiers are not supported in target syntax") }
-	if port < 0 || port > 65535 || port == 0 && o.Port != 0 { return nil, fmt.Errorf("port must be between 1 and 65535") }
+	if strings.Contains(host, "%") {
+		return nil, fmt.Errorf("IPv6 zone identifiers are not supported in target syntax")
+	}
+	if port < 0 || port > 65535 || port == 0 && o.Port != 0 {
+		return nil, fmt.Errorf("port must be between 1 and 65535")
+	}
 	args := []string{"-tt", "-o", "RequestTTY=force", "-o", "StrictHostKeyChecking=yes"}
 	if o.IdentityFile != "" {
-		if strings.ContainsAny(o.IdentityFile, "\\r\\n\\x00") { return nil, fmt.Errorf("invalid identity file path") }
+		if strings.ContainsAny(o.IdentityFile, "`r`n`0") {
+			return nil, fmt.Errorf("invalid identity file path")
+		}
 		args = append(args, "-i", filepath.Clean(o.IdentityFile))
 	}
-	if port != 0 { args = append(args, "-p", strconv.Itoa(port)) }
+	if port != 0 {
+		args = append(args, "-p", strconv.Itoa(port))
+	}
 	args = append(args, "--", user+"@"+host)
 	return args, nil
 }
 
 // ParseTarget validates the authority without accepting URL schemes or shell syntax.
-func ParseTarget(s string) error { _, err := BuildArgs(Options{Target:s}); return err }
+func ParseTarget(s string) error { _, err := BuildArgs(Options{Target: s}); return err }
 
 // Keep url imported in this package's API docs explicit: URL-form targets are rejected.
