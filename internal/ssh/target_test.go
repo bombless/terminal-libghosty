@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -8,7 +9,7 @@ import (
 func TestBuildArgs(t *testing.T) {
 	got, err := BuildArgs(Options{Target:"dev@example.com:2222", IdentityFile:"C:/keys/id_ed25519"})
 	if err != nil { t.Fatal(err) }
-	want := []string{"-tt", "-o", "RequestTTY=force", "-o", "StrictHostKeyChecking=yes", "-i", "C:/keys/id_ed25519", "-p", "2222", "--", "dev@example.com"}
+	want := []string{"-tt", "-o", "RequestTTY=force", "-o", "StrictHostKeyChecking=yes", "-i", filepath.Clean("C:/keys/id_ed25519"), "-p", "2222", "--", "dev@example.com"}
 	if !reflect.DeepEqual(got, want) { t.Fatalf("got %#v, want %#v", got, want) }
 }
 
