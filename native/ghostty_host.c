@@ -129,6 +129,12 @@ int tlg_ghostty_host_create(tlg_ghostty_host **out, void *native_window,
                                      GHOSTTY_TERMINAL_OPT_WRITE_PTY,
                                      (const void *)tlg_on_write_pty);
     }
+    if (result == GHOSTTY_SUCCESS) {
+        bool default_cursor_blink = true;
+        (void)ghostty_terminal_set(host->terminal,
+                                   GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK,
+                                   &default_cursor_blink);
+    }
     if (result != GHOSTTY_SUCCESS) {
         ghostty_terminal_free(host->terminal);
         ghostty_render_state_row_cells_free(host->row_cells);

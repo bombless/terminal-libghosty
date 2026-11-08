@@ -207,6 +207,12 @@ func mainWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		}
 		return 0
 
+	case wmSetFocus:
+		if mw != nil && mw.connected && mw.termView != nil {
+			mw.termView.Focus()
+			return 0
+		}
+
 	case wmClose:
 		if mw != nil && mw.termView != nil {
 			mw.termView.CloseSession()

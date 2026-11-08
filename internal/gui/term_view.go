@@ -8,6 +8,7 @@ import (
 	"log"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/bombless/terminal-libghosty/internal/d2d"
@@ -52,6 +53,7 @@ var (
 	procSetBkMode            = g32.NewProc("SetBkMode")
 	procCreateFontW          = g32.NewProc("CreateFontW")
 	procSelectObject         = g32.NewProc("SelectObject")
+	procGetCaretBlinkTime    = u32.NewProc("GetCaretBlinkTime")
 )
 
 const (
@@ -157,6 +159,11 @@ type TerminalView struct {
 	frameText   []byte
 	frameCursor terminal.Cursor
 
+	focused            bool
+	cursorBlinkVisible bool
+	lastBlinkToggle    time.Time
+	blinkInterval      time.Duration
+
 	processExited bool
 	onExit        func(code uint32)
 	mu            sync.Mutex
@@ -179,6 +186,27 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 	switch m {
 	case wmGetDlgCode:
 		return dlgcWantAllKeys | dlgcWantArrows | dlgcWantTab | dlgcWantChars
+
+	case wmSetFocus:
+		if tv != nil {
+			tv.mu.Lock()
+			tv.focused = true
+			tv.cursorBlinkVisible = true
+			tv.lastBlinkToggle = time.Now()
+			tv.mu.Unlock()
+			procInvalidateRect.Call(hwnd, 0, 0)
+		}
+		return 0
+
+	case wmKillFocus:
+		if tv != nil {
+			tv.mu.Lock()
+			tv.focused = false
+			tv.cursorBlinkVisible = true
+			tv.mu.Unlock()
+			procInvalidateRect.Call(hwnd, 0, 0)
+		}
+		return 0
 
 	case wmLButtonDown:
 		procSetFocus.Call(hwnd)
@@ -215,6 +243,7 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 
 	case wmChar:
 		if tv != nil && tv.sess != nil && w <= 0x10FFFF {
+			tv.resetCursorBlink()
 			buf := []byte(string(rune(w)))
 			_ = tv.sess.Write(buf)
 		}
@@ -254,6 +283,7 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 				seq = "\x1b[6~"
 			}
 			if seq != "" {
+				tv.resetCursorBlink()
 				_ = tv.sess.Write([]byte(seq))
 				return 0
 			}
@@ -314,14 +344,23 @@ func NewTerminalView(parentHwnd uintptr, onExit func(code uint32)) (*TerminalVie
 		return nil, fmt.Errorf("create DirectWrite text format: %w", err)
 	}
 
+	blinkInterval := 500 * time.Millisecond
+	if r, _, _ := procGetCaretBlinkTime.Call(); r > 0 && r < 0xFFFFFFFF {
+		blinkInterval = time.Duration(r) * time.Millisecond
+	}
+
 	tv := &TerminalView{
-		d2dCtx:     ctx,
-		textFormat: textFormat,
-		cellWidth:  9.0,
-		cellHeight: 18.0,
-		cols:       80,
-		rows:       24,
-		onExit:     onExit,
+		d2dCtx:             ctx,
+		textFormat:         textFormat,
+		cellWidth:          9.0,
+		cellHeight:         18.0,
+		cols:               80,
+		rows:               24,
+		onExit:             onExit,
+		focused:            true,
+		cursorBlinkVisible: true,
+		lastBlinkToggle:    time.Now(),
+		blinkInterval:      blinkInterval,
 	}
 
 	name := utf16Ptr(d2dViewClassName)
@@ -387,6 +426,9 @@ func (tv *TerminalView) AttachSession(sess *terminal.Session) {
 	tv.frameReady = false
 	tv.frameCells = nil
 	tv.frameText = nil
+	tv.focused = true
+	tv.cursorBlinkVisible = true
+	tv.lastBlinkToggle = time.Now()
 
 	if sess != nil {
 		var r rect
@@ -428,7 +470,20 @@ func (tv *TerminalView) Show(visible bool) {
 }
 
 func (tv *TerminalView) Focus() {
+	tv.mu.Lock()
+	tv.focused = true
+	tv.cursorBlinkVisible = true
+	tv.lastBlinkToggle = time.Now()
+	tv.mu.Unlock()
 	procSetFocus.Call(tv.hwnd)
+}
+
+func (tv *TerminalView) resetCursorBlink() {
+	tv.mu.Lock()
+	tv.cursorBlinkVisible = true
+	tv.lastBlinkToggle = time.Now()
+	tv.mu.Unlock()
+	procInvalidateRect.Call(tv.hwnd, 0, 0)
 }
 
 func (tv *TerminalView) Destroy() {
@@ -497,15 +552,40 @@ func (tv *TerminalView) pollState() {
 		changed = true
 	}
 
+	now := time.Now()
+	blinkChanged := false
+
+	tv.mu.Lock()
+	shouldBlink := cursor.Visible != 0 && cursor.Blinking != 0 && tv.focused
+	if shouldBlink {
+		interval := tv.blinkInterval
+		if interval <= 0 {
+			interval = 500 * time.Millisecond
+		}
+		if now.Sub(tv.lastBlinkToggle) >= interval {
+			tv.cursorBlinkVisible = !tv.cursorBlinkVisible
+			tv.lastBlinkToggle = now
+			blinkChanged = true
+		}
+	} else {
+		if !tv.cursorBlinkVisible {
+			tv.cursorBlinkVisible = true
+			blinkChanged = true
+		}
+	}
+
 	if changed {
-		tv.mu.Lock()
 		tv.frameCols, tv.frameRows = cc, rr
 		tv.frameCells = cells
 		tv.frameText = text
 		tv.frameCursor = cursor
 		tv.frameReady = true
-		tv.mu.Unlock()
+		tv.cursorBlinkVisible = true
+		tv.lastBlinkToggle = now
+	}
+	tv.mu.Unlock()
 
+	if changed || blinkChanged {
 		procInvalidateRect.Call(tv.hwnd, 0, 0)
 	}
 }
@@ -521,6 +601,8 @@ func (tv *TerminalView) render() {
 	cells := tv.frameCells
 	buf := tv.frameText
 	cur := tv.frameCursor
+	cursorVisible := tv.cursorBlinkVisible
+	focused := tv.focused
 	tv.mu.Unlock()
 
 	tv.rt.BeginDraw()
@@ -595,19 +677,25 @@ func (tv *TerminalView) render() {
 
 		// Cursor
 		if cur.Visible != 0 && cur.X < cc && cur.Y < rr {
-			d2d.SetBrushColor(tv.brush, d2d.Color{
-				R: float32(0xE8) / 255.0,
-				G: float32(0xE8) / 255.0,
-				B: float32(0xE8) / 255.0,
-				A: 0.85,
-			})
-			cursorRect := d2d.RectF{
-				Left:   float32(cur.X) * cw,
-				Top:    float32(cur.Y) * ch,
-				Right:  float32(cur.X)*cw + 2.0,
-				Bottom: float32(cur.Y+1) * ch,
+			drawCursor := true
+			if cur.Blinking != 0 && focused {
+				drawCursor = cursorVisible
 			}
-			tv.rt.FillRectangle(cursorRect, tv.brush)
+			if drawCursor {
+				d2d.SetBrushColor(tv.brush, d2d.Color{
+					R: float32(0xE8) / 255.0,
+					G: float32(0xE8) / 255.0,
+					B: float32(0xE8) / 255.0,
+					A: 0.85,
+				})
+				cursorRect := d2d.RectF{
+					Left:   float32(cur.X) * cw,
+					Top:    float32(cur.Y) * ch,
+					Right:  float32(cur.X)*cw + 2.0,
+					Bottom: float32(cur.Y+1) * ch,
+				}
+				tv.rt.FillRectangle(cursorRect, tv.brush)
+			}
 		}
 	}
 

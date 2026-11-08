@@ -54,6 +54,8 @@ int main(void) {
         return fail("snapshot copy call failed");
     if (cursor.visible && (cursor.x >= cols || cursor.y >= rows))
         return fail("snapshot cursor position is outside the viewport");
+    if (!cursor.blinking)
+        return fail("expected default cursor to be blinking");
     text[text_bytes] = 0;
     int found_chinese = 0, found_bold_green = 0, found_green_color = 0;
     for (size_t i = 0; i < cell_count; i++) {
