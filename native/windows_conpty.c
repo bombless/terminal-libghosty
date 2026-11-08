@@ -2,6 +2,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include "windows_conpty.h"
 
+#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -10,8 +12,20 @@
 #define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 0x00020016
 #endif
 
+static void tlg_log_conpty(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(stderr, "[conpty %02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    fflush(stderr);
+    va_end(ap);
+}
+
 struct tlg_conpty {
-    HANDLE input_write, output_read, process, reader_thread;
+    HANDLE input_write, output_read, process, reader_thread, job;
     HPCON pseudo_console;
     tlg_conpty_output_fn on_output;
     tlg_conpty_exit_fn on_exit;
@@ -79,16 +93,23 @@ static wchar_t *build_command_line(const tlg_conpty_config *cfg) {
 static DWORD WINAPI output_worker(void *arg) {
     tlg_conpty *s = (tlg_conpty *)arg;
     uint8_t buffer[16 * 1024];
+    tlg_log_conpty("output_worker: reader thread started");
     for (;;) {
         DWORD count = 0;
         BOOL ok = ReadFile(s->output_read, buffer, (DWORD)sizeof(buffer), &count, NULL);
-        if (!ok || count == 0) break;
+        if (!ok || count == 0) {
+            DWORD err = GetLastError();
+            tlg_log_conpty("output_worker: ReadFile exited (ok=%d, count=%lu, err=%lu)", ok, (unsigned long)count, (unsigned long)err);
+            break;
+        }
         if (s->on_output) s->on_output(s->userdata, buffer, (size_t)count);
     }
+    tlg_log_conpty("output_worker: waiting for child process to exit");
     WaitForSingleObject(s->process, INFINITE);
     DWORD code = 1;
     if (GetExitCodeProcess(s->process, &code)) {
         s->exit_code = code; InterlockedExchange(&s->exit_known, 1);
+        tlg_log_conpty("output_worker: child process exited with code %lu", (unsigned long)code);
         if (s->on_exit) s->on_exit(s->userdata, (uint32_t)code);
     }
     return 0;
@@ -152,12 +173,31 @@ int tlg_conpty_create(tlg_conpty **out, const tlg_conpty_config *cfg, uint32_t *
     if (!created) { error = GetLastError(); goto fail; }
     close_handle(&pi.hThread); s->process = pi.hProcess;
     DeleteProcThreadAttributeList(attrs); free(attrs); attrs = NULL;
+
+    /* Bind child process to a Job Object configured with KILL_ON_JOB_CLOSE so
+     * that when this host process terminates for any reason, all child and
+     * grandchild processes (including conhost and ssh) are automatically terminated. */
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+        memset(&jeli, 0, sizeof(jeli));
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli))) {
+            AssignProcessToJobObject(job, pi.hProcess);
+            s->job = job;
+            tlg_log_conpty("tlg_conpty_create: child process assigned to auto-kill job object");
+        } else {
+            close_handle(&job);
+        }
+    }
+
     /* Publish the session handle before the reader can deliver early child
      * output. The combined SSH/VT callback may synchronously answer an
      * immediate terminal query as soon as the first bytes arrive. */
     *out = s;
     s->reader_thread = CreateThread(NULL, 0, output_worker, s, 0, NULL);
     if (!s->reader_thread) { *out = NULL; error = GetLastError(); goto fail; }
+    tlg_log_conpty("tlg_conpty_create: session created successfully (pid=%lu)", (unsigned long)GetProcessId(s->process));
     return TLG_CONPTY_OK;
 
 fail:
@@ -167,15 +207,17 @@ fail:
     if (s->pseudo_console) { ClosePseudoConsole(s->pseudo_console); s->pseudo_console = NULL; }
     if (pi.hThread) close_handle(&pi.hThread);
     close_handle(&pi.hProcess); close_handle(&s->input_write); close_handle(&s->output_read);
-    close_handle(&s->process); close_handle(&s->reader_thread);
+    close_handle(&s->process); close_handle(&s->reader_thread); close_handle(&s->job);
     DeleteCriticalSection(&s->write_lock); free(s);
     set_error(out_error, error);
+    tlg_log_conpty("tlg_conpty_create: failed with error %lu", (unsigned long)error);
     return result;
 }
 
 int tlg_conpty_write(tlg_conpty *s, const uint8_t *bytes, size_t len, uint32_t *out_error) {
     set_error(out_error, ERROR_SUCCESS);
     if (!s || (!bytes && len)) return TLG_CONPTY_ERROR_INVALID_ARGUMENT;
+    tlg_log_conpty("tlg_conpty_write: writing %zu bytes", len);
     EnterCriticalSection(&s->write_lock);
     size_t offset = 0;
     while (offset < len) {
@@ -183,19 +225,27 @@ int tlg_conpty_write(tlg_conpty *s, const uint8_t *bytes, size_t len, uint32_t *
         DWORD written = 0;
         if (!WriteFile(s->input_write, bytes + offset, chunk, &written, NULL) || !written) {
             DWORD error = GetLastError(); LeaveCriticalSection(&s->write_lock);
-            set_error(out_error, error); return TLG_CONPTY_ERROR_WIN32;
+            set_error(out_error, error);
+            tlg_log_conpty("tlg_conpty_write: WriteFile failed: err=%lu written=%lu", (unsigned long)error, (unsigned long)written);
+            return TLG_CONPTY_ERROR_WIN32;
         }
         offset += written;
     }
     LeaveCriticalSection(&s->write_lock);
+    tlg_log_conpty("tlg_conpty_write: successfully wrote %zu bytes", len);
     return TLG_CONPTY_OK;
 }
 
 int tlg_conpty_resize(tlg_conpty *s, uint16_t cols, uint16_t rows, uint32_t *out_error) {
     set_error(out_error, ERROR_SUCCESS);
     if (!s || !cols || !rows) return TLG_CONPTY_ERROR_INVALID_ARGUMENT;
+    tlg_log_conpty("tlg_conpty_resize: cols=%u rows=%u", cols, rows);
     HRESULT hr = ResizePseudoConsole(s->pseudo_console, (COORD){(SHORT)cols, (SHORT)rows});
-    if (FAILED(hr)) { set_error(out_error, (DWORD)HRESULT_CODE(hr)); return TLG_CONPTY_ERROR_WIN32; }
+    if (FAILED(hr)) {
+        set_error(out_error, (DWORD)HRESULT_CODE(hr));
+        tlg_log_conpty("tlg_conpty_resize: ResizePseudoConsole failed: hr=0x%08lX", (unsigned long)hr);
+        return TLG_CONPTY_ERROR_WIN32;
+    }
     return TLG_CONPTY_OK;
 }
 
@@ -216,9 +266,19 @@ int tlg_conpty_poll_exit(tlg_conpty *s, uint32_t *out_code, uint32_t *out_error)
 
 void tlg_conpty_close(tlg_conpty *s) {
     if (!s) return;
-    if (s->process && WaitForSingleObject(s->process, 0) == WAIT_TIMEOUT) TerminateProcess(s->process, 1);
+    tlg_log_conpty("tlg_conpty_close: closing session");
+    if (s->process && WaitForSingleObject(s->process, 0) == WAIT_TIMEOUT) {
+        tlg_log_conpty("tlg_conpty_close: terminating process");
+        TerminateProcess(s->process, 1);
+    }
     if (s->pseudo_console) { ClosePseudoConsole(s->pseudo_console); s->pseudo_console = NULL; }
-    if (s->reader_thread) { WaitForSingleObject(s->reader_thread, INFINITE); close_handle(&s->reader_thread); }
+    if (s->reader_thread) {
+        tlg_log_conpty("tlg_conpty_close: waiting for reader thread");
+        WaitForSingleObject(s->reader_thread, 2000);
+        close_handle(&s->reader_thread);
+    }
     close_handle(&s->input_write); close_handle(&s->output_read); close_handle(&s->process);
+    close_handle(&s->job);
     DeleteCriticalSection(&s->write_lock); free(s);
+    tlg_log_conpty("tlg_conpty_close: session freed");
 }

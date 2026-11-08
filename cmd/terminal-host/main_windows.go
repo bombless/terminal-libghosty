@@ -6,11 +6,15 @@ package main
 import (
 	"bytes"
 	"flag"
+	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/bombless/terminal-libghosty/internal/ssh"
@@ -18,35 +22,44 @@ import (
 )
 
 var (
-	u                = syscall.NewLazyDLL("user32.dll")
-	g                = syscall.NewLazyDLL("gdi32.dll")
-	createWindow     = u.NewProc("CreateWindowExW")
-	registerClass    = u.NewProc("RegisterClassW")
-	defWindowProc    = u.NewProc("DefWindowProcW")
-	getMessage       = u.NewProc("GetMessageW")
-	translateMessage = u.NewProc("TranslateMessage")
-	dispatchMessage  = u.NewProc("DispatchMessageW")
-	showWindow       = u.NewProc("ShowWindow")
-	updateWindow     = u.NewProc("UpdateWindow")
-	postQuit         = u.NewProc("PostQuitMessage")
-	beginPaint       = u.NewProc("BeginPaint")
-	endPaint         = u.NewProc("EndPaint")
-	fillRect         = u.NewProc("FillRect")
-	getClientRect    = u.NewProc("GetClientRect")
-	moveWindow       = u.NewProc("MoveWindow")
-	setTimer         = u.NewProc("SetTimer")
-	invalidateRect   = u.NewProc("InvalidateRect")
-	setTextColor     = g.NewProc("SetTextColor")
-	setBkMode        = g.NewProc("SetBkMode")
-	textOut          = g.NewProc("TextOutW")
-	createBrush      = g.NewProc("CreateSolidBrush")
-	deleteObject     = g.NewProc("DeleteObject")
-	createCompatibleDC     = g.NewProc("CreateCompatibleDC")
-	createCompatibleBitmap = g.NewProc("CreateCompatibleBitmap")
-	selectObject          = g.NewProc("SelectObject")
-	bitBlt                = g.NewProc("BitBlt")
-	deleteDC              = g.NewProc("DeleteDC")
-	createFont            = g.NewProc("CreateFontW")
+	u                        = syscall.NewLazyDLL("user32.dll")
+	g                        = syscall.NewLazyDLL("gdi32.dll")
+	k                        = syscall.NewLazyDLL("kernel32.dll")
+	createWindow             = u.NewProc("CreateWindowExW")
+	registerClass            = u.NewProc("RegisterClassW")
+	defWindowProc            = u.NewProc("DefWindowProcW")
+	getMessage               = u.NewProc("GetMessageW")
+	translateMessage         = u.NewProc("TranslateMessage")
+	dispatchMessage          = u.NewProc("DispatchMessageW")
+	showWindow               = u.NewProc("ShowWindow")
+	updateWindow             = u.NewProc("UpdateWindow")
+	postQuit                 = u.NewProc("PostQuitMessage")
+	destroyWindow            = u.NewProc("DestroyWindow")
+	isWindow                 = u.NewProc("IsWindow")
+	setFocus                 = u.NewProc("SetFocus")
+	postMessage              = u.NewProc("PostMessageW")
+	getWindowThreadProcessId = u.NewProc("GetWindowThreadProcessId")
+	openProcess              = k.NewProc("OpenProcess")
+	waitForSingleObject      = k.NewProc("WaitForSingleObject")
+	closeHandle              = k.NewProc("CloseHandle")
+	beginPaint               = u.NewProc("BeginPaint")
+	endPaint                 = u.NewProc("EndPaint")
+	fillRect                 = u.NewProc("FillRect")
+	getClientRect            = u.NewProc("GetClientRect")
+	moveWindow               = u.NewProc("MoveWindow")
+	setTimer                 = u.NewProc("SetTimer")
+	invalidateRect           = u.NewProc("InvalidateRect")
+	setTextColor             = g.NewProc("SetTextColor")
+	setBkMode                = g.NewProc("SetBkMode")
+	textOut                  = g.NewProc("TextOutW")
+	createBrush              = g.NewProc("CreateSolidBrush")
+	deleteObject             = g.NewProc("DeleteObject")
+	createCompatibleDC       = g.NewProc("CreateCompatibleDC")
+	createCompatibleBitmap   = g.NewProc("CreateCompatibleBitmap")
+	selectObject             = g.NewProc("SelectObject")
+	bitBlt                   = g.NewProc("BitBlt")
+	deleteDC                 = g.NewProc("DeleteDC")
+	createFont               = g.NewProc("CreateFontW")
 )
 
 type POINT struct{ X, Y int32 }
@@ -74,17 +87,27 @@ type WNDCLASS struct {
 }
 
 const (
-	wmDestroy    = 2
-	wmSize       = 5
-	wmPaint      = 15
-	wmEraseBkgnd = 0x14
-	wmChar       = 0x102
-	wmKeyDown    = 0x100
-	wmTimer      = 0x113
-	wsChild      = 0x40000000
-	wsVisible    = 0x10000000
-	wsTabStop    = 0x10000
-	srccopy      = 0x00CC0020
+	wmDestroy       = 2
+	wmSize          = 5
+	wmSetFocus      = 7
+	wmKillFocus     = 8
+	wmClose         = 0x0010
+	wmPaint         = 15
+	wmEraseBkgnd    = 0x14
+	wmMouseActivate = 0x21
+	wmGetDlgCode    = 0x0087
+	wmKeyDown       = 0x100
+	wmChar          = 0x102
+	wmTimer         = 0x113
+	wmLButtonDown   = 0x201
+	dlgcWantAllKeys = 0x0004
+	dlgcWantArrows  = 0x0001
+	dlgcWantTab     = 0x0002
+	dlgcWantChars   = 0x0080
+	wsChild         = 0x40000000
+	wsVisible       = 0x10000000
+	wsTabStop       = 0x10000
+	srccopy         = 0x00CC0020
 )
 
 var sess *terminal.Session
@@ -98,6 +121,21 @@ var frameCells []terminal.Cell
 var frameText []byte
 var frameCursor terminal.Cursor
 
+type syncFileWriter struct {
+	mu sync.Mutex
+	f  *os.File
+}
+
+func (s *syncFileWriter) Write(p []byte) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, err = s.f.Write(p)
+	if err == nil {
+		_ = s.f.Sync()
+	}
+	return
+}
+
 func wide(s string) *uint16 { p, _ := syscall.UTF16PtrFromString(s); return p }
 func max(a, b int32) int32 {
 	if a > b {
@@ -105,6 +143,7 @@ func max(a, b int32) int32 {
 	}
 	return b
 }
+
 func resize(hwnd uintptr) {
 	if sess == nil {
 		return
@@ -114,11 +153,16 @@ func resize(hwnd uintptr) {
 	c := uint16(max((r.Right-r.Left)/9, 1))
 	rr := uint16(max((r.Bottom-r.Top)/18, 1))
 	if c != cols || rr != rows {
-		if sess.Resize(c, rr) == nil {
+		log.Printf("resize requested: (%d,%d) -> (%d,%d)", cols, rows, c, rr)
+		if err := sess.Resize(c, rr); err == nil {
+			log.Printf("sess.Resize succeeded: cols=%d rows=%d", c, rr)
 			cols, rows = c, rr
+		} else {
+			log.Printf("sess.Resize failed: %v", err)
 		}
 	}
 }
+
 func refreshFrame(hwnd uintptr) {
 	if sess == nil {
 		return
@@ -140,24 +184,56 @@ func refreshFrame(hwnd uintptr) {
 		changed = true
 	}
 	if changed {
+		log.Printf("refreshFrame: screen changed (cols=%d rows=%d textLen=%d cells=%d cursor=(%d,%d,vis=%d))",
+			cc, rr, len(text), len(cells), cursor.X, cursor.Y, cursor.Visible)
 		frameCols, frameRows, frameCells, frameText, frameCursor = cc, rr, cells, text, cursor
 		frameReady = true
 		invalidateRect.Call(hwnd, 0, 0)
+		updateWindow.Call(hwnd)
 	}
 }
 
 func wndproc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 	switch m {
+	case wmGetDlgCode:
+		return dlgcWantAllKeys | dlgcWantArrows | dlgcWantTab | dlgcWantChars
+	case wmClose:
+		log.Print("WM_CLOSE received, destroying window")
+		destroyWindow.Call(hwnd)
+		return 0
+	case wmLButtonDown:
+		log.Print("WM_LBUTTONDOWN: terminal clicked, restoring keyboard focus")
+		setFocus.Call(hwnd)
+		return 0
+	case wmMouseActivate:
+		return 1 // MA_ACTIVATE
+	case wmSetFocus:
+		log.Print("WM_SETFOCUS: terminal child window gained keyboard focus")
+		return 0
+	case wmKillFocus:
+		log.Print("WM_KILLFOCUS: terminal child window lost keyboard focus")
+		return 0
 	case wmEraseBkgnd:
 		return 1
 	case wmSize:
 		resize(hwnd)
 	case wmChar:
+		log.Printf("WM_CHAR: char=0x%04X (%q)", w, rune(w))
 		if sess != nil && w <= 0x10ffff {
-			_ = sess.Write([]byte(string(rune(w))))
+			buf := []byte(string(rune(w)))
+			err := sess.Write(buf)
+			if err != nil {
+				log.Printf("WM_CHAR: sess.Write failed for %q: %v", rune(w), err)
+			} else {
+				log.Printf("WM_CHAR: sess.Write succeeded for %q (%d bytes)", rune(w), len(buf))
+			}
 		}
 		return 0
 	case wmKeyDown:
+		log.Printf("WM_KEYDOWN: vk=0x%02X", w)
+		if w == 0x0D {
+			log.Print("WM_KEYDOWN: Enter (VK_RETURN) detected")
+		}
 		if sess != nil {
 			seq := ""
 			switch w {
@@ -177,15 +253,31 @@ func wndproc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 				seq = "\x1b[2~"
 			case 0x2e:
 				seq = "\x1b[3~"
+			case 0x21:
+				seq = "\x1b[5~"
+			case 0x22:
+				seq = "\x1b[6~"
 			case 0x1b:
 				seq = "\x1b"
 			}
 			if seq != "" {
-				_ = sess.Write([]byte(seq))
+				log.Printf("WM_KEYDOWN: mapped to escape seq %q", seq)
+				err := sess.Write([]byte(seq))
+				if err != nil {
+					log.Printf("WM_KEYDOWN: sess.Write failed: %v", err)
+				}
 				return 0
 			}
 		}
 	case wmTimer:
+		if parent != 0 {
+			r, _, _ := isWindow.Call(parent)
+			if r == 0 {
+				log.Print("parent window is no longer valid, exiting terminal-host")
+				destroyWindow.Call(hwnd)
+				return 0
+			}
+		}
 		var parentRect, childRect RECT
 		getClientRect.Call(parent, uintptr(unsafe.Pointer(&parentRect)))
 		getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&childRect)))
@@ -233,7 +325,11 @@ func wndproc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 					var brushColor uint32
 					for y := uint16(0); y < rr; y++ {
 						for x := uint16(0); x < cc; x++ {
-							cell := cells[int(y)*int(cc)+int(x)]
+							idx := int(y)*int(cc) + int(x)
+							if idx >= len(cells) {
+								continue
+							}
+							cell := cells[idx]
 							bg := uint32(cell.Background.R) | uint32(cell.Background.G)<<8 | uint32(cell.Background.B)<<16
 							if cell.Selected != 0 {
 								bg = 0x00a05028
@@ -282,6 +378,7 @@ func wndproc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		endPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
 	case wmDestroy:
+		log.Print("WM_DESTROY received, cleaning up session and font")
 		if sess != nil {
 			sess.Close()
 			sess = nil
@@ -296,17 +393,31 @@ func wndproc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 	r, _, _ := defWindowProc.Call(hwnd, uintptr(m), w, l)
 	return r
 }
+
 func main() {
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.LUTC)
-	log.Print("terminal-host starting")
-	var target, key, parentText string
+	var target, key, parentText, logDir string
 	var port int
 	flag.StringVar(&target, "ssh", "", "SSH target user@host[:port]")
 	flag.StringVar(&key, "identity", "", "private key path")
 	flag.IntVar(&port, "port", 0, "SSH port override")
 	flag.StringVar(&parentText, "parent", "", "parent Win32 HWND")
+	flag.StringVar(&logDir, "log-dir", "", "directory for host logs")
 	flag.Parse()
-	log.Printf("arguments parsed: target=%q parent=%q port=%d identityConfigured=%t", target, parentText, port, key != "")
+
+	logOutputs := []io.Writer{os.Stderr}
+	if logDir != "" {
+		_ = os.MkdirAll(logDir, 0755)
+		logPath := filepath.Join(logDir, "host.log")
+		if lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
+			defer lf.Close()
+			logOutputs = append(logOutputs, &syncFileWriter{f: lf})
+		}
+	}
+	log.SetOutput(io.MultiWriter(logOutputs...))
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+
+	log.Print("terminal-host starting")
+	log.Printf("arguments parsed: target=%q parent=%q port=%d identityConfigured=%t logDir=%q", target, parentText, port, key != "", logDir)
 	if target == "" || parentText == "" {
 		log.Print("startup validation failed: --ssh and --parent are required")
 		os.Exit(2)
@@ -322,6 +433,26 @@ func main() {
 		os.Exit(2)
 	}
 	parent = uintptr(p)
+
+	// Monitor parent process so terminal-host immediately terminates if parent process dies.
+	var parentPid uint32
+	getWindowThreadProcessId.Call(parent, uintptr(unsafe.Pointer(&parentPid)))
+	if parentPid != 0 {
+		log.Printf("detected parent PID: %d", parentPid)
+		// SYNCHRONIZE = 0x00100000
+		hProc, _, _ := openProcess.Call(0x00100000, 0, uintptr(parentPid))
+		if hProc != 0 {
+			go func() {
+				defer closeHandle.Call(hProc)
+				// Wait for parent process to exit
+				waitForSingleObject.Call(hProc, 0xFFFFFFFF)
+				log.Print("parent process exited, terminating terminal-host")
+				time.Sleep(50 * time.Millisecond)
+				os.Exit(0)
+			}()
+		}
+	}
+
 	log.Printf("starting SSH ConPTY session: parent=0x%X", parent)
 	sess, e = terminal.StartSSH(ssh.Options{Target: target, IdentityFile: key, Port: port}, cols, rows)
 	if e != nil {
@@ -334,6 +465,7 @@ func main() {
 			sess.Close()
 		}
 	}()
+
 	cb := syscall.NewCallback(wndproc)
 	name := wide("TerminalLibghostyEmbedded")
 	wc := WNDCLASS{WndProc: cb, Background: 0, ClassName: name}
@@ -356,7 +488,7 @@ func main() {
 	log.Printf("embedded terminal window created: hwnd=0x%X parent=0x%X", hwnd, parent)
 	showWindow.Call(hwnd, 5)
 	updateWindow.Call(hwnd)
-	u.NewProc("SetFocus").Call(hwnd)
+	setFocus.Call(hwnd)
 	setTimer.Call(hwnd, 1, 25, 0)
 	var m MSG
 	for {
@@ -367,4 +499,5 @@ func main() {
 		translateMessage.Call(uintptr(unsafe.Pointer(&m)))
 		dispatchMessage.Call(uintptr(unsafe.Pointer(&m)))
 	}
+	log.Print("message loop exited, terminal-host ending")
 }

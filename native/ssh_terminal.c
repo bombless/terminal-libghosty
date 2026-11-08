@@ -1,8 +1,22 @@
 #define WIN32_LEAN_AND_MEAN
 #include "ssh_terminal.h"
 
+#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+
+static void tlg_log_ssh(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(stderr, "[ssh-term %02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    fflush(stderr);
+    va_end(ap);
+}
 
 struct tlg_ssh_terminal {
     tlg_conpty *conpty;
@@ -16,6 +30,7 @@ static void set_error(uint32_t *out, uint32_t value) { if (out) *out = value; }
 static void on_pty_output(void *userdata, const uint8_t *bytes, size_t len) {
     tlg_ssh_terminal *s = (tlg_ssh_terminal *)userdata;
     if (!s || !bytes || !len || InterlockedCompareExchange(&s->closing, 0, 0)) return;
+    tlg_log_ssh("on_pty_output: feed %zu bytes to Ghostty VT", len);
     EnterCriticalSection(&s->vt_lock);
     if (!InterlockedCompareExchange(&s->closing, 0, 0) && s->ghostty)
         (void)tlg_ghostty_host_feed_output(s->ghostty, bytes, len);
@@ -25,9 +40,14 @@ static void on_pty_output(void *userdata, const uint8_t *bytes, size_t len) {
 static void on_ghostty_input(void *userdata, const uint8_t *bytes, size_t len) {
     tlg_ssh_terminal *s = (tlg_ssh_terminal *)userdata;
     if (!s || !s->conpty || InterlockedCompareExchange(&s->closing, 0, 0)) return;
+    tlg_log_ssh("on_ghostty_input: Ghostty requested write to ConPTY (%zu bytes)", len);
     /* Called synchronously while vt_lock is held. ConPTY owns a separate
      * write lock, so this callback must not re-enter the VT host. */
-    (void)tlg_conpty_write(s->conpty, bytes, len, NULL);
+    uint32_t err = 0;
+    int rc = tlg_conpty_write(s->conpty, bytes, len, &err);
+    if (rc != TLG_CONPTY_OK) {
+        tlg_log_ssh("on_ghostty_input: write failed: rc=%d err=%lu", rc, (unsigned long)err);
+    }
 }
 
 int tlg_ssh_terminal_create_argv(tlg_ssh_terminal **out,
@@ -84,7 +104,12 @@ int tlg_ssh_terminal_write(tlg_ssh_terminal *s, const uint8_t *bytes,
                            size_t len, uint32_t *out_error) {
     if (!s || InterlockedCompareExchange(&s->closing, 0, 0))
         return TLG_CONPTY_ERROR_INVALID_ARGUMENT;
-    return tlg_conpty_write(s->conpty, bytes, len, out_error);
+    tlg_log_ssh("tlg_ssh_terminal_write: writing %zu bytes", len);
+    int rc = tlg_conpty_write(s->conpty, bytes, len, out_error);
+    if (rc != TLG_CONPTY_OK) {
+        tlg_log_ssh("tlg_ssh_terminal_write: failed with rc=%d", rc);
+    }
+    return rc;
 }
 
 int tlg_ssh_terminal_resize(tlg_ssh_terminal *s, uint16_t cols, uint16_t rows,
@@ -93,6 +118,7 @@ int tlg_ssh_terminal_resize(tlg_ssh_terminal *s, uint16_t cols, uint16_t rows,
     if (!s || !cols || !rows || !cell_width_px || !cell_height_px ||
         InterlockedCompareExchange(&s->closing, 0, 0))
         return TLG_CONPTY_ERROR_INVALID_ARGUMENT;
+    tlg_log_ssh("tlg_ssh_terminal_resize: cols=%u rows=%u", cols, rows);
     EnterCriticalSection(&s->vt_lock);
     int rc = tlg_conpty_resize(s->conpty, cols, rows, out_error);
     if (rc == TLG_CONPTY_OK) {
@@ -175,6 +201,7 @@ int tlg_ssh_terminal_read_text(tlg_ssh_terminal *s, uint8_t *buffer,
 
 void tlg_ssh_terminal_close(tlg_ssh_terminal *s) {
     if (!s) return;
+    tlg_log_ssh("tlg_ssh_terminal_close: closing terminal");
     InterlockedExchange(&s->closing, 1);
     /* Do not hold vt_lock while close joins the ConPTY reader, which may be
      * finishing an output callback that needs that lock. */
@@ -186,4 +213,5 @@ void tlg_ssh_terminal_close(tlg_ssh_terminal *s) {
     LeaveCriticalSection(&s->vt_lock);
     DeleteCriticalSection(&s->vt_lock);
     free(s);
+    tlg_log_ssh("tlg_ssh_terminal_close: closed successfully");
 }

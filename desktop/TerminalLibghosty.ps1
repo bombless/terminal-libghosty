@@ -10,6 +10,13 @@ function Write-Log([string]$Message,[string]$Level='INFO') {
  Write-Host $line
 }
 Write-Log 'GUI startup.'
+
+# Cleanup any orphaned terminal-host processes from previous runs
+Get-Process -Name 'terminal-host' -ErrorAction SilentlyContinue | ForEach-Object {
+ Write-Log "Terminating orphaned terminal-host process (pid=$($_.Id)) before starting." 'WARN'
+ Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+}
+
 try { Start-Transcript -LiteralPath (Join-Path $script:logDir 'gui-transcript.log') -Append -ErrorAction Stop | Out-Null } catch { Write-Log "Could not start transcript: $($_.Exception.Message)" 'WARN' }
 Add-Type @'
 using System;
@@ -19,6 +26,7 @@ public static class TerminalLibghostyWin32 {
  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr lParam);
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder name, int max);
  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+ [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hwnd);
  delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
  public static IntPtr FindChild(IntPtr parent, string className) {
   IntPtr found=IntPtr.Zero;
@@ -31,13 +39,13 @@ $store=Join-Path $env:APPDATA 'TerminalLibghosty\connections.json'
 function LoadProfiles { if(Test-Path $store){try{return @(Get-Content $store -Raw|ConvertFrom-Json)}catch{}}; @() }
 function SaveProfiles { New-Item -ItemType Directory -Force (Split-Path $store)|Out-Null; $script:profiles|ConvertTo-Json -Depth 4|Set-Content -Encoding UTF8 $store }
 $script:profiles=@(LoadProfiles)
-$f=New-Object Windows.Forms.Form; $f.Text='Terminal Libghosty - SSH Manager'; $f.Size='1000,680'; $f.MinimumSize='850,560'; $f.StartPosition='CenterScreen'; $f.BackColor=[Drawing.Color]::FromArgb(18,22,30); $f.ForeColor='White'
+$f=New-Object Windows.Forms.Form; $f.Text='Terminal Libghosty - SSH Manager'; $f.Size='1000,680'; $f.MinimumSize='850,560'; $f.StartPosition='CenterScreen'; $f.BackColor=[Drawing.Color]::FromArgb(18,22,30); $f.ForeColor='White'; $f.KeyPreview=$false; $f.AcceptButton=$null; $f.CancelButton=$null
 $h=New-Object Windows.Forms.Label; $h.Text='TERMINAL LIBGHOSTY'; $h.Font=New-Object Drawing.Font('Segoe UI',20,[Drawing.FontStyle]::Bold); $h.Location='28,20'; $h.Size='500,40'; $f.Controls.Add($h)
 $s=New-Object Windows.Forms.Label; $s.Text='SSH CONNECTION MANAGER'; $s.Location='31,65'; $s.Size='500,25'; $s.ForeColor='Silver'; $f.Controls.Add($s)
 $l=New-Object Windows.Forms.ListBox; $l.Location='28,112'; $l.Size='420,440'; $l.Anchor='Top,Bottom,Left'; $l.BackColor=[Drawing.Color]::FromArgb(27,33,44); $l.ForeColor='White'; $l.Font=New-Object Drawing.Font('Segoe UI',11); $f.Controls.Add($l)
 function RefreshList {$l.Items.Clear();foreach($p in $script:profiles){[void]$l.Items.Add("$($p.Name)  ·  $($p.Target)")}}
 $pnl=New-Object Windows.Forms.Panel; $pnl.Location='480,112'; $pnl.Size='475,440'; $pnl.Anchor='Top,Bottom,Left,Right'; $pnl.BackColor=[Drawing.Color]::FromArgb(27,33,44); $f.Controls.Add($pnl)
-$termHost=New-Object Windows.Forms.Panel; $termHost.Location='10,50'; $termHost.Size='455,380'; $termHost.Anchor='Top,Bottom,Left,Right'; $termHost.BackColor=[Drawing.Color]::FromArgb(15,19,26); $termHost.Visible=$false; $pnl.Controls.Add($termHost)
+$termHost=New-Object Windows.Forms.Panel; $termHost.Location='10,50'; $termHost.Size='455,380'; $termHost.Anchor='Top,Bottom,Left,Right'; $termHost.BackColor=[Drawing.Color]::FromArgb(15,19,26); $termHost.Visible=$false; $termHost.TabStop=$true; $pnl.Controls.Add($termHost)
 function Field($caption,$y){$a=New-Object Windows.Forms.Label;$a.Text=$caption;$a.Location="24,$y";$a.Size='420,22';$a.ForeColor='Silver';$pnl.Controls.Add($a);$b=New-Object Windows.Forms.TextBox;$b.Location="24,$($y+25)";$b.Size='420,30';$b.Font=New-Object Drawing.Font('Segoe UI',11);$b.BackColor=[Drawing.Color]::FromArgb(15,19,26);$b.ForeColor='White';$pnl.Controls.Add($b);return $b}
 $n=Field 'CONNECTION NAME' 20;$t=Field 'SSH ADDRESS (user@host[:port])' 95;$po=Field 'PORT OVERRIDE (OPTIONAL)' 170;$k=Field 'PRIVATE KEY FILE (OPTIONAL)' 245
 $st=New-Object Windows.Forms.Label;$st.Location='28,570';$st.Size='920,35';$st.Anchor='Bottom,Left,Right';$st.ForeColor='LightGreen';$st.Text='Ready · SSH host-key verification enabled';$f.Controls.Add($st)
@@ -46,13 +54,32 @@ Button 'SAVE CONNECTION' 24 350 190 { $v=$t.Text.Trim();if($v -notmatch '^[A-Za-
 $script:hostProcess=$null
 $script:hostHwnd=[IntPtr]::Zero
 function StopEmbeddedHost {
- if($script:hostHwnd -ne [IntPtr]::Zero){[TerminalLibghostyWin32]::PostMessage($script:hostHwnd,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;$script:hostHwnd=[IntPtr]::Zero}
- if($script:hostProcess){try{Wait-Process -Id $script:hostProcess.Id -Timeout 3 -ErrorAction Stop}catch{};try{if(!$script:hostProcess.HasExited){Stop-Process -Id $script:hostProcess.Id -Force}}catch{}}
- $script:hostProcess=$null
+ Write-Log 'StopEmbeddedHost called.'
+ if($script:hostHwnd -ne [IntPtr]::Zero){
+  Write-Log "Posting WM_CLOSE to embedded window 0x$($script:hostHwnd.ToString('X'))"
+  [TerminalLibghostyWin32]::PostMessage($script:hostHwnd,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+  $script:hostHwnd=[IntPtr]::Zero
+ }
+ if($script:hostProcess){
+  try{
+   if(-not $script:hostProcess.HasExited){
+    Write-Log "Waiting up to 1s for host process $($script:hostProcess.Id) to exit."
+    Wait-Process -Id $script:hostProcess.Id -Timeout 1 -ErrorAction Stop
+   }
+  }catch{}
+  try{
+   if(-not $script:hostProcess.HasExited){
+    Write-Log "Host process $($script:hostProcess.Id) still active; stopping forcibly." 'WARN'
+    Stop-Process -Id $script:hostProcess.Id -Force -ErrorAction SilentlyContinue
+   }
+  }catch{}
+  $script:hostProcess=$null
+ }
 }
 $script:profileControls=@($pnl.Controls | Where-Object { $_ -ne $termHost })
 $disconnect=Button '← BACK / DISCONNECT' 10 5 210 {StopEmbeddedHost;$termHost.Visible=$false;foreach($c in $script:profileControls){$c.Visible=$true};$disconnect.Visible=$false;$connectButton.Visible=$true;$deleteButton.Visible=$true;$st.Text='Disconnected.'} $pnl
 $disconnect.Visible=$false
+$disconnect.TabStop=$false
 $connectButton=Button 'CONNECT  →' 232 350 190 {
  Write-Log 'Connect button clicked.'
  if($l.SelectedIndex -lt 0){$st.Text='Select a connection first.';return}
@@ -68,7 +95,7 @@ $connectButton=Button 'CONNECT  →' 232 350 190 {
  }
  $env:TERMINAL_LIBGHOSTY_NATIVE_DIR=$native
  $parentHandle='0x{0:X}' -f $termHost.Handle.ToInt64()
- $argLine='--ssh "{0}" --parent {1}' -f $q.Target,$parentHandle
+ $argLine='--ssh "{0}" --parent {1} --log-dir "{2}"' -f $q.Target,$parentHandle,$script:logDir
  if($q.Port -gt 0){$argLine+=' --port '+[string]$q.Port}
  if($q.Identity){$argLine+=' --identity "'+$q.Identity+'"'}
  try{
@@ -81,7 +108,11 @@ $connectButton=Button 'CONNECT  →' 232 350 190 {
   for($i=0;$i -lt 40 -and !$script:hostProcess.HasExited;$i++){
    [Windows.Forms.Application]::DoEvents()
    $script:hostHwnd=[TerminalLibghostyWin32]::FindChild($termHost.Handle,'TerminalLibghostyEmbedded')
-   if($script:hostHwnd -ne [IntPtr]::Zero){Write-Log ("Embedded child window found: hwnd=0x{0:X}; waitMs={1}" -f $script:hostHwnd.ToInt64(),($i*50));break}
+   if($script:hostHwnd -ne [IntPtr]::Zero){
+    Write-Log ("Embedded child window found: hwnd=0x{0:X}; waitMs={1}" -f $script:hostHwnd.ToInt64(),($i*50))
+    [TerminalLibghostyWin32]::SetFocus($script:hostHwnd) | Out-Null
+    break
+   }
    Start-Sleep -Milliseconds 50
   }
   if($script:hostHwnd -eq [IntPtr]::Zero){$exitInfo='still running';try{if($script:hostProcess.HasExited){$exitInfo="exit code $($script:hostProcess.ExitCode)"}}catch{};$errTail='';if(Test-Path $hostStderr){$errTail=(Get-Content -LiteralPath $hostStderr -Tail 30 -ErrorAction SilentlyContinue) -join ' | '};Write-Log "Embedded window missing; host $exitInfo; stderr=$errTail" 'ERROR';throw "Embedded terminal child window failed to initialize (host $exitInfo). See $hostStderr"}
@@ -90,6 +121,7 @@ $connectButton=Button 'CONNECT  →' 232 350 190 {
  }catch{Write-Log "Connect failed: $($_.Exception.Message)" 'ERROR';StopEmbeddedHost;$termHost.Visible=$false;foreach($c in $script:profileControls){$c.Visible=$true};$connectButton.Visible=$true;$deleteButton.Visible=$true;$disconnect.Visible=$false;$st.Text=$_.Exception.Message}
 } $pnl
 $f.Add_FormClosing({StopEmbeddedHost})
+$f.Add_FormClosed({StopEmbeddedHost})
 $deleteButton=New-Object Windows.Forms.Button
 $deleteButton.Text='DELETE';$deleteButton.Location='28,490';$deleteButton.Size='130,42';$deleteButton.FlatStyle='Flat';$deleteButton.BackColor=[Drawing.Color]::FromArgb(48,112,210);$deleteButton.ForeColor='White';$pnl.Controls.Add($deleteButton)
 $deleteButton.Add_Click({
@@ -105,6 +137,10 @@ $deleteButton.Add_Click({
 })
 $l.Add_SelectedIndexChanged({if($l.SelectedIndex -ge 0){$q=$script:profiles[$l.SelectedIndex];$n.Text=$q.Name;$t.Text=$q.Target;$po.Text=if($q.Port){[string]$q.Port}else{''};$k.Text=$q.Identity}})
 RefreshList
-[void]$f.ShowDialog()
-Write-Log 'GUI closed.'
-try { Stop-Transcript | Out-Null } catch {}
+try {
+ [Windows.Forms.Application]::Run($f)
+} finally {
+ StopEmbeddedHost
+ Write-Log 'GUI closed.'
+ try { Stop-Transcript | Out-Null } catch {}
+}
