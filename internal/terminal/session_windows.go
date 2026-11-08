@@ -4,43 +4,25 @@ package terminal
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
-	"syscall"
-	"unsafe"
 
 	"github.com/bombless/terminal-libghosty/internal/ssh"
 )
 
-var (
-	sessionDLL          = newSessionDLL()
-	procCreate          = sessionDLL.NewProc("tlg_ssh_terminal_create_argv")
-	procWrite           = sessionDLL.NewProc("tlg_ssh_terminal_write")
-	procResize          = sessionDLL.NewProc("tlg_ssh_terminal_resize")
-	procPoll            = sessionDLL.NewProc("tlg_ssh_terminal_poll_exit")
-	procReadText        = sessionDLL.NewProc("tlg_ssh_terminal_read_text")
-	procSnapshot        = sessionDLL.NewProc("tlg_ssh_terminal_snapshot")
-	procClose           = sessionDLL.NewProc("tlg_ssh_terminal_close")
-	procSetDllDirectory = syscall.NewLazyDLL("kernel32.dll").NewProc("SetDllDirectoryW")
-	dllLoadOnce         sync.Once
-	dllLoadErr          error
-)
-
-func newSessionDLL() *syscall.LazyDLL {
-	if dir := os.Getenv("TERMINAL_LIBGHOSTY_NATIVE_DIR"); dir != "" {
-		return syscall.NewLazyDLL(filepath.Join(dir, "terminal_libghosty_session.dll"))
-	}
-	return syscall.NewLazyDLL("terminal_libghosty_session.dll")
+// Session composes the Go ConPTY process manager with the official Ghostty VT
+// library. vtMu serializes every terminal mutation and snapshot operation.
+type Session struct {
+	mu        sync.Mutex
+	vtMu      sync.Mutex
+	conpty    *conPTY
+	ghostty   *ghosttyHost
+	closing   bool
+	closeDone chan struct{}
 }
 
-// Session methods must not race Close. The native layer serializes VT snapshots/resizes and pipe writes.
-type Session struct{ handle uintptr }
-
-// Cell and Cursor mirror the stable project-owned C ABI in native/ghostty_host.h.
 type RGB struct{ R, G, B uint8 }
 type Cell struct {
 	TextOffset, TextLength, StyleFlags uint32
@@ -62,203 +44,192 @@ func StartSSH(options ssh.Options, cols, rows uint16) (*Session, error) {
 	return Start("ssh.exe", args, cols, rows)
 }
 
-func findNativeDir() string {
-	if dir := os.Getenv("TERMINAL_LIBGHOSTY_NATIVE_DIR"); dir != "" {
-		return dir
-	}
-	candidates := []string{
-		"build/native-local",
-		"../build/native-local",
-		"../../build/native-local",
-	}
-	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		candidates = append(candidates,
-			exeDir,
-			filepath.Join(exeDir, "..", "build", "native-local"),
-			filepath.Join(exeDir, "native-local"),
-		)
-	}
-	for _, c := range candidates {
-		abs, err := filepath.Abs(c)
-		if err == nil {
-			if _, err := os.Stat(filepath.Join(abs, "terminal_libghosty_session.dll")); err == nil {
-				return abs
-			}
-		}
-	}
-	return ""
-}
-
-func loadNativeDLL() error {
-	dllLoadOnce.Do(func() {
-		dir := findNativeDir()
-		if dir != "" {
-			p, err := syscall.UTF16PtrFromString(dir)
-			if err != nil {
-				dllLoadErr = err
-				return
-			}
-			r1, _, callErr := procSetDllDirectory.Call(uintptr(unsafe.Pointer(p)))
-			runtime.KeepAlive(p)
-			if r1 == 0 {
-				dllLoadErr = fmt.Errorf("SetDllDirectoryW: %w", callErr)
-				return
-			}
-		}
-		dllLoadErr = sessionDLL.Load()
-		if dir != "" {
-			// The session DLL and its Ghostty dependency are now loaded; restore
-			// the default process search path instead of leaving a global override.
-			procSetDllDirectory.Call(0)
-		}
-	})
-	return dllLoadErr
-}
-
 func Start(executable string, args []string, cols, rows uint16) (*Session, error) {
-	if err := loadNativeDLL(); err != nil {
-		return nil, fmt.Errorf("load native terminal bridge: %w", err)
+	if executable == "" || cols == 0 || rows == 0 {
+		return nil, fmt.Errorf("invalid terminal executable or dimensions")
 	}
-	if !filepath.IsAbs(executable) && !strings.ContainsAny(executable, `/\\`) {
+	if !filepath.IsAbs(executable) && !strings.ContainsAny(executable, "/\\") {
 		resolved, err := exec.LookPath(executable)
 		if err != nil {
 			return nil, fmt.Errorf("resolve executable %q: %w", executable, err)
 		}
 		executable = resolved
 	}
-	exe, err := syscall.UTF16PtrFromString(executable)
-	if err != nil {
-		return nil, err
-	}
-	wide := make([]*uint16, len(args))
-	for i, arg := range args {
-		wide[i], err = syscall.UTF16PtrFromString(arg)
-		if err != nil {
-			return nil, fmt.Errorf("argument %d: %w", i, err)
+	s := &Session{closeDone: make(chan struct{})}
+	inputReady := make(chan struct{})
+	host, err := newGhosttyHost(func(data []byte) {
+		// The ConPTY reader can deliver a query immediately after process
+		// creation. Wait until the returned process handle is published.
+		<-inputReady
+		s.mu.Lock()
+		p := s.conpty
+		closing := s.closing
+		s.mu.Unlock()
+		if p != nil && !closing {
+			_ = p.Write(data)
 		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create Ghostty VT host: %w", err)
 	}
-	var argv uintptr
-	if len(wide) > 0 {
-		argv = uintptr(unsafe.Pointer(&wide[0]))
+	s.ghostty = host
+	if err := host.resize(cols, rows, 9, 18); err != nil {
+		host.destroy()
+		return nil, fmt.Errorf("initialize Ghostty VT size: %w", err)
 	}
-	var handle uintptr
-	var winErr uint32
-	r1, _, _ := procCreate.Call(
-		uintptr(unsafe.Pointer(&handle)), uintptr(unsafe.Pointer(exe)), argv,
-		uintptr(len(wide)), uintptr(cols), uintptr(rows), 9, 18,
-		uintptr(unsafe.Pointer(&winErr)))
-	runtime.KeepAlive(exe)
-	runtime.KeepAlive(wide)
-	runtime.KeepAlive(args)
-	if int32(r1) != 0 {
-		return nil, fmt.Errorf("create SSH ConPTY session failed (status=%d, win32=%d)", int32(r1), winErr)
+	p, err := newConPTY(executable, args, cols, rows, func(data []byte) {
+		s.mu.Lock()
+		closing := s.closing
+		s.mu.Unlock()
+		if closing {
+			return
+		}
+		s.vtMu.Lock()
+		defer s.vtMu.Unlock()
+		s.mu.Lock()
+		host := s.ghostty
+		closing = s.closing
+		s.mu.Unlock()
+		if !closing && host != nil {
+			_ = host.feedOutput(data)
+		}
+	}, nil)
+	if err != nil {
+		host.destroy()
+		return nil, fmt.Errorf("create ConPTY process: %w", err)
 	}
-	return &Session{handle: handle}, nil
+	s.mu.Lock()
+	s.conpty = p
+	s.mu.Unlock()
+	close(inputReady)
+	return s, nil
 }
 
 func (s *Session) Write(data []byte) error {
-	if s == nil || s.handle == 0 {
+	if s == nil {
 		return fmt.Errorf("terminal session is closed")
 	}
-	var ptr uintptr
-	if len(data) > 0 {
-		ptr = uintptr(unsafe.Pointer(&data[0]))
+	s.mu.Lock()
+	if s.closing || s.conpty == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("terminal session is closed")
 	}
-	var winErr uint32
-	r1, _, _ := procWrite.Call(s.handle, ptr, uintptr(len(data)), uintptr(unsafe.Pointer(&winErr)))
-	runtime.KeepAlive(data)
-	if int32(r1) != 0 {
-		return fmt.Errorf("terminal write failed (status=%d, win32=%d)", int32(r1), winErr)
-	}
-	return nil
+	p := s.conpty
+	s.mu.Unlock()
+	return p.Write(data)
 }
 
 func (s *Session) Resize(cols, rows uint16) error {
-	if s == nil || s.handle == 0 {
+	if s == nil || cols == 0 || rows == 0 {
+		return fmt.Errorf("invalid terminal resize dimensions")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.conpty == nil || s.ghostty == nil {
+		s.mu.Unlock()
 		return fmt.Errorf("terminal session is closed")
 	}
-	var winErr uint32
-	r1, _, _ := procResize.Call(s.handle, uintptr(cols), uintptr(rows), 9, 18, uintptr(unsafe.Pointer(&winErr)))
-	if int32(r1) != 0 {
-		return fmt.Errorf("terminal resize failed (status=%d, win32=%d)", int32(r1), winErr)
+	p, host := s.conpty, s.ghostty
+	s.mu.Unlock()
+	if err := p.Resize(cols, rows); err != nil {
+		return fmt.Errorf("resize ConPTY: %w", err)
+	}
+	if err := host.resize(cols, rows, 9, 18); err != nil {
+		return fmt.Errorf("resize Ghostty VT: %w", err)
 	}
 	return nil
 }
 
 func (s *Session) PollExit() (bool, uint32, error) {
-	if s == nil || s.handle == 0 {
+	if s == nil {
 		return false, 0, fmt.Errorf("terminal session is closed")
 	}
-	var code, winErr uint32
-	r1, _, _ := procPoll.Call(s.handle, uintptr(unsafe.Pointer(&code)), uintptr(unsafe.Pointer(&winErr)))
-	if int32(r1) < 0 {
-		return false, 0, fmt.Errorf("terminal poll failed (status=%d, win32=%d)", int32(r1), winErr)
+	s.mu.Lock()
+	if s.closing || s.conpty == nil {
+		s.mu.Unlock()
+		return false, 0, fmt.Errorf("terminal session is closed")
 	}
-	return r1 == 1, code, nil
+	p := s.conpty
+	s.mu.Unlock()
+	return p.PollExit()
 }
 
 // Snapshot returns a caller-owned copy of Ghostty's rendered cell grid.
 func (s *Session) Snapshot() (uint16, uint16, []Cell, []byte, Cursor, error) {
-	if s == nil || s.handle == 0 {
+	if s == nil {
 		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("terminal session is closed")
 	}
-	var cols, rows uint16
-	var cellCount, textBytes uintptr
-	var cursor Cursor
-	r1, _, _ := procSnapshot.Call(s.handle, 0, 0, 0, 0,
-		uintptr(unsafe.Pointer(&cols)), uintptr(unsafe.Pointer(&rows)),
-		uintptr(unsafe.Pointer(&cellCount)), uintptr(unsafe.Pointer(&textBytes)),
-		uintptr(unsafe.Pointer(&cursor)))
-	if int32(r1) != -4 && int32(r1) != 0 {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("terminal snapshot sizing failed: %d", int32(r1))
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("terminal session is closed")
 	}
-	cells := make([]Cell, int(cellCount))
-	text := make([]byte, int(textBytes))
-	var cellPtr, textPtr uintptr
-	if len(cells) != 0 {
-		cellPtr = uintptr(unsafe.Pointer(&cells[0]))
-	}
-	if len(text) != 0 {
-		textPtr = uintptr(unsafe.Pointer(&text[0]))
-	}
-	r1, _, _ = procSnapshot.Call(s.handle, cellPtr, cellCount, textPtr, textBytes,
-		uintptr(unsafe.Pointer(&cols)), uintptr(unsafe.Pointer(&rows)),
-		uintptr(unsafe.Pointer(&cellCount)), uintptr(unsafe.Pointer(&textBytes)),
-		uintptr(unsafe.Pointer(&cursor)))
-	runtime.KeepAlive(cells)
-	runtime.KeepAlive(text)
-	if int32(r1) != 0 {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("terminal snapshot failed: %d", int32(r1))
-	}
-	return cols, rows, cells, text, cursor, nil
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.snapshot()
 }
 
+// SnapshotText returns the cell grid as UTF-8 text with CRLF row endings.
+// Empty cells are represented by one ASCII space, matching the native API.
 func (s *Session) SnapshotText() (string, error) {
-	if s == nil || s.handle == 0 {
-		return "", fmt.Errorf("terminal session is closed")
+	cols, rows, cells, text, _, err := s.Snapshot()
+	if err != nil {
+		return "", err
 	}
-	var required uintptr
-	r1, _, _ := procReadText.Call(s.handle, 0, 0, uintptr(unsafe.Pointer(&required)))
-	if int32(r1) != -4 && int32(r1) != 0 {
-		return "", fmt.Errorf("terminal snapshot sizing failed: %d", int32(r1))
+	var out strings.Builder
+	out.Grow(len(text) + len(cells) + int(rows)*2)
+	index := 0
+	for y := uint16(0); y < rows; y++ {
+		for x := uint16(0); x < cols; x++ {
+			c := cells[index]
+			index++
+			if c.TextLength == 0 {
+				out.WriteByte(' ')
+				continue
+			}
+			end := uint64(c.TextOffset) + uint64(c.TextLength)
+			if end > uint64(len(text)) {
+				return "", fmt.Errorf("Ghostty cell text range exceeds snapshot buffer")
+			}
+			out.Write(text[c.TextOffset:uint32(end)])
+		}
+		out.WriteString("\r\n")
 	}
-	buf := make([]byte, int(required))
-	if required == 0 {
-		return "", nil
-	}
-	r1, _, _ = procReadText.Call(s.handle, uintptr(unsafe.Pointer(&buf[0])), required, uintptr(unsafe.Pointer(&required)))
-	runtime.KeepAlive(buf)
-	if int32(r1) != 0 {
-		return "", fmt.Errorf("terminal snapshot failed: %d", int32(r1))
-	}
-	return string(buf[:int(required)]), nil
+	return out.String(), nil
 }
 
 func (s *Session) Close() {
-	if s == nil || s.handle == 0 {
+	if s == nil {
 		return
 	}
-	procClose.Call(s.handle)
-	s.handle = 0
+	s.mu.Lock()
+	if s.closing {
+		done := s.closeDone
+		s.mu.Unlock()
+		<-done
+		return
+	}
+	s.closing = true
+	p := s.conpty
+	s.mu.Unlock()
+
+	// Never hold vtMu while joining the ConPTY reader: that reader may be
+	// waiting to finish an output callback that needs vtMu.
+	if p != nil {
+		p.Close()
+	}
+	s.vtMu.Lock()
+	s.mu.Lock()
+	host := s.ghostty
+	s.ghostty = nil
+	s.conpty = nil
+	s.mu.Unlock()
+	if host != nil {
+		host.destroy()
+	}
+	s.vtMu.Unlock()
+	close(s.closeDone)
 }

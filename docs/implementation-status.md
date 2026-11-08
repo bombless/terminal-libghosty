@@ -5,72 +5,70 @@
 - SSH profile manager GUI and profile persistence.
 - SSH target validation and argument construction.
 - Strict host-key checking and forced PTY requested for SSH sessions.
-- The profile manager's Connect action now creates an embedded Win32 child-window host in the existing right-hand panel. The helper calls `internal/terminal.StartSSH()` with the selected profile and native DLL directory; it no longer launches `wt.exe`.
+- The profile manager's Connect action creates an embedded Win32 child-window host in the existing right-hand panel and calls `internal/terminal.StartSSH()`; it no longer launches `wt.exe`.
 
-## Upstream Ghostty integration
+## Ghostty VT integration
 
-- Inspected upstream `ghostty-org/ghostty` at
-  `5813c9461d5af78b6307a1254d00b1bc190eaccd`.
-- Added a Windows CMake integration pinned to that exact revision.
-- Added a C ABI smoke test using upstream `<ghostty/vt.h>` declarations.
-- The selected Windows-supported component is `libghostty-vt`: terminal state,
-  VT parsing, render-state snapshots, cell/style iteration, and input encoders.
-- The upstream `ghostty.h` internal embedder API is not a general-purpose
-  Windows embedding API. This project provides its own Win32 host and renderer
-  around the supported VT library rather than treating the macOS-oriented
-  internal API as portable.
-- The local Ghostty source snapshot used for the successful build reports
-  Ghostty 1.4.1-dev / libghostty-vt 1.1.0-dev and has no Git metadata. It cannot
-  be confirmed to match the CMake pin; validate against the exact pinned
-  revision before shipping.
+- The project uses the public `libghostty-vt` C ABI from the official `ghostty-vt.dll`; the upstream internal `ghostty.h` embedder API is not used.
+- The original `native/ghostty_host.c` is the compatibility reference for terminal creation, VT feed, WRITE_PTY callback, render-state iteration, UTF-8 graphemes, resolved colors, style flags, selection, cursor and resize.
+- `internal/terminal/ghostty_host_windows.go` now implements that host behavior in Go using Windows DLL calls. It does not use cgo and does not decode packed Ghostty cell bits.
+- The Ghostty DLL used by the working native C reference and its passing CTest suite is the compatibility target. The exact upstream Git pin is not a migration blocker.
 
-## Native SSH / ConPTY / Ghostty VT bridge
+## ConPTY and Go Session
 
-- Added `native/ssh_terminal.h/.c` to own ConPTY and the Ghostty VT host as one
-  session. ConPTY reader output is fed into the VT parser; Ghostty's synchronous
-  `WRITE_PTY` callback writes terminal replies back into ConPTY.
-- The session ABI serializes VT feed/snapshot/resize and exposes input writes,
-  resize, exit polling, cell/text snapshots, and close.
-- Added `internal/terminal.StartSSH`, which reuses `internal/ssh.BuildArgs()`,
-  resolves Windows `ssh.exe`, and starts it through the native DLL without a
-  shell. `StrictHostKeyChecking=yes` remains enabled.
-- End-to-end tests cover local `cmd.exe` input/output, a DSR query whose
-  Ghostty-generated reply is consumed by a child process, resize, exit, and the
-  real Windows `ssh.exe -V` process through the same bridge.
-- The Go Windows wrapper runtime tests load the DLL, run `ssh.exe -V`, and
-  verify `StartSSH()` reports the expected closed-loopback-port failure through
-  the VT snapshot. During development set `TERMINAL_LIBGHOSTY_NATIVE_DIR` to
-  the directory containing `terminal_libghosty_session.dll` and `ghostty-vt.dll`.
+- `internal/terminal/conpty_windows.go` implements ConPTY creation, process launch, Windows argv quoting, pipe I/O, resize, process polling, output-EOF notification and cleanup.
+- `internal/terminal/session_windows.go` composes the Go ConPTY manager and Ghostty host while preserving the public Session methods: `StartSSH`, `Start`, `Write`, `Resize`, `PollExit`, `Snapshot`, `SnapshotText`, and `Close`.
+- The Go Session preserves the original C initialization order: create Ghostty and install its callback, resize the VT, then start ConPTY. The input callback waits until the ConPTY handle is published so an early terminal query can be answered.
+- VT feed, resize and snapshot are serialized. ConPTY writes have their own lock. Close stops and joins the ConPTY reader before destroying the Ghostty host, without holding the VT lock while joining.
+- `StartSSH` continues to use `internal/ssh.BuildArgs()`, resolves Windows `ssh.exe`, and starts it without a shell. `StrictHostKeyChecking=yes` remains enabled.
+- The Go application no longer loads or depends on `terminal_libghosty_session.dll`.
 
-## Remaining work
+## Compatibility tests
 
-1. Validate the used API against the exact pinned Ghostty revision; the local
-   source snapshot has no Git metadata and cannot establish pin identity.
-2. Improve the GDI renderer: font selection, DPI-aware cell metrics, complete
-   style flags (bold/italic/underline), wide-cell layout, scrollback, and
-   cursor shape/blink. The current host draws Ghostty cell colors, selection,
-   graphemes, and a basic cursor.
-3. Complete keyboard handling for function keys and modifiers, then add IME,
-   focus reporting, mouse reporting, local selection, clipboard, and paste.
-4. Test authenticated remote SSH sessions, host-key first-use/mismatch,
-   remote disconnects, Unicode/TUI applications, alternate screen, resize,
-   long output, and handle cleanup.
+The original C implementation, headers, CMake targets and C tests remain in
+`native/` as a runnable reference baseline.
+
+Equivalent Go tests cover:
+
+- Ghostty PTY callback and DSR 5 -> DSR 0 reply.
+- UTF-8 grapheme content, ANSI bold/green foreground color and cursor blink.
+- Ghostty snapshot cell/text buffers and resize dimensions.
+- ConPTY argv quoting, input/output round-trip, long output, process exit,
+  output-EOF callback timing, failed startup and concurrent Close.
+- A child process that sends a DSR query and verifies the Ghostty response
+  arrives through ConPTY input.
+- Real Windows `ssh.exe -V` output in the Ghostty snapshot.
+- SSH connection-refused output and styled cell snapshot through StartSSH.
 
 ## Verified Windows build
 
-- Release CMake build succeeds using Zig 0.17.0, LLVM-MinGW Clang, CMake 3.25.1,
-  and the local Ghostty source directory.
-- `ctest --test-dir build/native-local -C Release --output-on-failure`: 4/4 passed.
-- `go test ./...`: passed, including native Windows `ssh.exe -V` and `StartSSH()` loopback tests.
-- `go vet ./...`: passed.
-- The Go wrapper uses the standard Go Windows syscall/DLL interface; cgo and
-  gccgo are not required for this session bridge.
+- `CGO_ENABLED=0 go test ./...`: passed.
+- `CGO_ENABLED=0 go build ./...`: passed.
+- `go vet -unsafeptr=false ./...`: passed. Default `go vet ./...` still
+  reports unsafe.Pointer diagnostics in existing Windows GUI/D2D FFI code.
+- The original native CTest baseline: 4/4 passed
+  (`libghostty_vt_smoke`, `ghostty_host_bridge`, `windows_conpty_smoke`,
+  `ssh_conpty_ghostty_e2e`).
+- Both Windows GUI executables build with `-H=windowsgui` and cgo disabled.
+  The official `ghostty-vt.dll` was copied beside them in `dist/`.
+
+## Remaining work
+
+1. Improve the GDI renderer: font selection, DPI-aware cell metrics, complete
+   style flags (bold/italic/underline), wide-cell layout, scrollback, and
+   cursor shape/blink. The current host draws Ghostty cell colors, selection,
+   graphemes, and a basic cursor.
+2. Complete keyboard handling for function keys and modifiers, then add IME,
+   focus reporting, mouse reporting, local selection, clipboard, and paste.
+3. Test authenticated remote SSH sessions, host-key first-use/mismatch,
+   remote disconnects, Unicode/TUI applications, alternate screen, resize,
+   long output, and handle cleanup.
 
 ## Scope
 
-The native SSH → ConPTY → Ghostty VT bridge is implemented and tested, and
-the profile manager now embeds a Win32 child host that calls `StartSSH()`.
-The host paints Ghostty cell snapshots (colors, selection, graphemes, cursor),
+The production SSH -> Go ConPTY -> Ghostty VT path is implemented and tested.
+The profile manager embeds a Win32 child host that calls `StartSSH()`. The
+host paints Ghostty cell snapshots (colors, selection, graphemes, cursor),
 routes basic text/navigation input, and resizes the session with its panel.
 This is a working first integration, not full terminal parity: IME, clipboard,
 mouse reporting/selection, scrollback, DPI/font handling, and advanced styles

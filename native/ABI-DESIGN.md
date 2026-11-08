@@ -1,8 +1,6 @@
 # Native host ABI design
 
-Status: design based on the checked-out local Ghostty headers (libghostty-vt
-1.1.0 headers). This is not a claim that the local source matches the CMake
-pin `5813c9461d5af78b6307a1254d00b1bc190eaccd`.
+Status: compatibility contract is defined by the working `native/` C host/session implementation and the `ghostty-vt.dll` used by its passing CMake tests. The Go adapter is required to preserve this behavior and ABI shape; the exact upstream Git pin is not a migration blocker.
 
 ## Boundary
 
@@ -62,11 +60,7 @@ until return. The callback must enqueue/copy those bytes for the ConPTY input
 pump and must never call `ghostty_terminal_vt_write` recursively on the same
 terminal (the upstream API explicitly says the terminal is non-reentrant).
 
-Until a deliberate lock/ownership model is implemented, serialize all
-terminal mutation and render-state update/read operations on one host-owned
-thread. ConPTY reader/writer workers communicate through bounded queues and
-never call Ghostty directly. This keeps the GUI message thread free of
-blocking pipe I/O and avoids concurrent terminal access.
+The Go Session serializes VT feed, resize, and snapshot through one mutex. The ConPTY reader feeds Ghostty while holding that mutex; Ghostty's synchronous PTY callback copies the borrowed bytes and writes them through ConPTY's separate serialized input path. The callback never recursively feeds the same Ghostty terminal. GUI calls do not perform pipe reads.
 
 ## Resize and validation
 
@@ -78,18 +72,13 @@ arguments before entering Ghostty. Project tests should cover lifecycle,
 fragmented UTF-8/VT input, ANSI state, resize, callback queueing, and repeated
 NULL-safe cleanup.
 
-## Version gate
+## Compatibility baseline
 
-The checked-out `include/ghostty/vt/version.h` reports 1.1.0. The project CMake
-file pins a different upstream Git revision, while the local Ghostty tree has
-no `.git` metadata. Keep the existing pin unchanged; before shipping, build
-against the actual pinned revision and compile/test every used symbol there.
-Do not treat a successful local-source build as proof of pin compatibility.
+The existing C implementation is the source of truth for behavior: `ghostty_host.c`, `windows_conpty.c`, and `ssh_terminal.c`, together with their C tests and the `ghostty-vt.dll` used by the working native build. The migration is accepted when the Go implementation passes equivalent tests against that same DLL and preserves the project-owned Cell/Cursor layout, callback behavior, snapshot content, resize, process lifecycle, and SSH output. The CMake upstream revision remains build provenance; fetching or proving that exact Git commit is not a prerequisite for matching the already-running native program.
 
 ## Combined SSH session adapter
 
-`ssh_terminal.h/.c` composes the opaque Ghostty host and ConPTY process into
-one opaque session exported by `terminal_libghosty_session.dll`.
+`ssh_terminal.h/.c` is the reference composition of the Ghostty host and ConPTY process. The production Go Session now composes `ghostty_host_windows.go` and `conpty_windows.go` directly; the original C session remains available for regression comparison.
 
 - Create the Ghostty host first, install its PTY write callback, resize it to
   the requested cell grid, then create the ConPTY child.
@@ -108,10 +97,7 @@ one opaque session exported by `terminal_libghosty_session.dll`.
 - Close marks the session as closing, closes ConPTY without holding the VT
   critical section (the reader may need that lock to finish), waits for the
   reader worker, then destroys the Ghostty host and its synchronization state.
-- The Go Windows wrapper calls `ssh.BuildArgs`, resolves `ssh.exe`, marshals
-  UTF-16 argv, and invokes the stable DLL ABI through `syscall`; no cgo or
-  gccgo dependency is introduced. The session DLL and `ghostty-vt.dll` must
-  be beside the application or in the configured native DLL directory.
+- The Go Windows Session calls `ssh.BuildArgs`, resolves `ssh.exe`, starts it through the Go ConPTY manager, and calls the official Ghostty VT C ABI through `syscall`; no cgo or project-owned session DLL is used. `ghostty-vt.dll` must be beside the application or in the configured native DLL directory.
 
 The end-to-end test verifies normal ConPTY input/output, a DSR query answered
 by Ghostty and delivered to the child process, resize, process exit/close, and
