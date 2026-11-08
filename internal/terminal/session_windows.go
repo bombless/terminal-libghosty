@@ -62,9 +62,37 @@ func StartSSH(options ssh.Options, cols, rows uint16) (*Session, error) {
 	return Start("ssh.exe", args, cols, rows)
 }
 
+func findNativeDir() string {
+	if dir := os.Getenv("TERMINAL_LIBGHOSTY_NATIVE_DIR"); dir != "" {
+		return dir
+	}
+	candidates := []string{
+		"build/native-local",
+		"../build/native-local",
+		"../../build/native-local",
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			exeDir,
+			filepath.Join(exeDir, "..", "build", "native-local"),
+			filepath.Join(exeDir, "native-local"),
+		)
+	}
+	for _, c := range candidates {
+		abs, err := filepath.Abs(c)
+		if err == nil {
+			if _, err := os.Stat(filepath.Join(abs, "terminal_libghosty_session.dll")); err == nil {
+				return abs
+			}
+		}
+	}
+	return ""
+}
+
 func loadNativeDLL() error {
 	dllLoadOnce.Do(func() {
-		dir := os.Getenv("TERMINAL_LIBGHOSTY_NATIVE_DIR")
+		dir := findNativeDir()
 		if dir != "" {
 			p, err := syscall.UTF16PtrFromString(dir)
 			if err != nil {

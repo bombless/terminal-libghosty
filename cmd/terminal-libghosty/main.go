@@ -4,34 +4,30 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 
-	"github.com/bombless/terminal-libghosty/internal/ssh"
+	"github.com/bombless/terminal-libghosty/internal/gui"
 )
+
+func init() {
+	runtime.LockOSThread()
+}
 
 func main() {
 	var target, identity string
 	var port int
-	flag.StringVar(&target, "ssh", "", "SSH target in user@host form (required)")
+	flag.StringVar(&target, "ssh", "", "SSH target in user@host[:port] form")
 	flag.StringVar(&identity, "identity", "", "SSH private key file")
-	flag.IntVar(&port, "port", 0, "SSH port override (default: target/default SSH config)")
+	flag.IntVar(&port, "port", 0, "SSH port override")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "terminal-libghosty - Windows libghostty SSH terminal host\\n\\n")
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: terminal-libghosty --ssh user@host[:port] [--identity keyfile] [--port port]\\n\\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "terminal-libghosty - Windows Direct2D libghostty SSH terminal\n\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: terminal-libghosty [--ssh user@host[:port]] [--identity keyfile] [--port port]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-	if target == "" {
-		flag.Usage()
-		os.Exit(2)
+
+	if err := gui.RunWithOptions(target, identity, port); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting terminal: %v\n", err)
+		os.Exit(1)
 	}
-	args, err := ssh.BuildArgs(ssh.Options{Target: target, IdentityFile: identity, Port: port})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "invalid SSH session:", err)
-		os.Exit(2)
-	}
-	fmt.Fprintln(os.Stderr, "SSH target validated. Interactive ConPTY/libghostty host is not wired in this bootstrap build.")
-	fmt.Fprintf(os.Stderr, "Would launch: ssh")
-	for _, arg := range args { fmt.Fprintf(os.Stderr, " %q", arg) }
-	fmt.Fprintln(os.Stderr)
-	os.Exit(1)
 }

@@ -10,4 +10,5 @@ test:
 	$(CGO_ENV) go test ./...
 
 build:
-	$(CGO_ENV) go build -ldflags="-H=windowsgui" -o dist/terminal-libghosty.exe ./cmd/desktop
+	$(CGO_ENV) go build -ldflags="-H=windowsgui" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
+	$(CGO_ENV) go build -ldflags="-H=windowsgui" -o dist/terminal-host.exe ./cmd/terminal-host

@@ -1,3 +1,13 @@
 @echo off
-taskkill /F /IM terminal-host.exe >nul 2>&1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0TerminalLibghosty.ps1" 1>>"%~dp0gui-start.stdout.log" 2>>"%~dp0gui-start.stderr.log"
+setlocal
+set "ROOT=%~dp0.."
+set "EXE=%ROOT%\dist\terminal-libghosty.exe"
+
+if not exist "%EXE%" (
+    echo Building terminal-libghosty...
+    pushd "%ROOT%"
+    go build -ldflags="-H=windowsgui" -o "%EXE%" ./cmd/terminal-libghosty
+    popd
+)
+
+start "" "%EXE%"
