@@ -41,6 +41,12 @@ var (
 	textOut          = g.NewProc("TextOutW")
 	createBrush      = g.NewProc("CreateSolidBrush")
 	deleteObject     = g.NewProc("DeleteObject")
+	createCompatibleDC     = g.NewProc("CreateCompatibleDC")
+	createCompatibleBitmap = g.NewProc("CreateCompatibleBitmap")
+	selectObject          = g.NewProc("SelectObject")
+	bitBlt                = g.NewProc("BitBlt")
+	deleteDC              = g.NewProc("DeleteDC")
+	createFont            = g.NewProc("CreateFontW")
 )
 
 type POINT struct{ X, Y int32 }
@@ -68,19 +74,22 @@ type WNDCLASS struct {
 }
 
 const (
-	wmDestroy = 2
-	wmSize    = 5
-	wmPaint   = 15
-	wmChar    = 0x102
-	wmKeyDown = 0x100
-	wmTimer   = 0x113
-	wsChild   = 0x40000000
-	wsVisible = 0x10000000
-	wsTabStop = 0x10000
+	wmDestroy    = 2
+	wmSize       = 5
+	wmPaint      = 15
+	wmEraseBkgnd = 0x14
+	wmChar       = 0x102
+	wmKeyDown    = 0x100
+	wmTimer      = 0x113
+	wsChild      = 0x40000000
+	wsVisible    = 0x10000000
+	wsTabStop    = 0x10000
+	srccopy      = 0x00CC0020
 )
 
 var sess *terminal.Session
 var parent uintptr
+var termFont uintptr
 var cols, rows uint16 = 80, 24
 var processExited bool
 var frameReady bool
@@ -133,12 +142,14 @@ func refreshFrame(hwnd uintptr) {
 	if changed {
 		frameCols, frameRows, frameCells, frameText, frameCursor = cc, rr, cells, text, cursor
 		frameReady = true
-		invalidateRect.Call(hwnd, 0, 0, 0)
+		invalidateRect.Call(hwnd, 0, 0)
 	}
 }
 
 func wndproc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 	switch m {
+	case wmEraseBkgnd:
+		return 1
 	case wmSize:
 		resize(hwnd)
 	case wmChar:
@@ -197,52 +208,76 @@ func wndproc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		hdc, _, _ := beginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		var r RECT
 		getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
-		br, _, _ := createBrush.Call(0x0018120e)
-		fillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), br)
-		deleteObject.Call(br)
-		setBkMode.Call(hdc, 1)
-		if sess != nil {
-			cc, rr, cells, buf, cur := frameCols, frameRows, frameCells, frameText, frameCursor
-			if frameReady {
-				var brush uintptr
-				var brushColor uint32
-				for y := uint16(0); y < rr; y++ {
-					for x := uint16(0); x < cc; x++ {
-						cell := cells[int(y)*int(cc)+int(x)]
-						bg := uint32(cell.Background.R) | uint32(cell.Background.G)<<8 | uint32(cell.Background.B)<<16
-						if cell.Selected != 0 {
-							bg = 0x00a05028
-						}
-						if brush == 0 || bg != brushColor {
-							if brush != 0 {
-								deleteObject.Call(brush)
+		w := max(r.Right-r.Left, 1)
+		h := max(r.Bottom-r.Top, 1)
+
+		memDC, _, _ := createCompatibleDC.Call(hdc)
+		if memDC != 0 {
+			memBmp, _, _ := createCompatibleBitmap.Call(hdc, uintptr(w), uintptr(h))
+			if memBmp != 0 {
+				oldBmp, _, _ := selectObject.Call(memDC, memBmp)
+
+				br, _, _ := createBrush.Call(0x0018120e)
+				fillRect.Call(memDC, uintptr(unsafe.Pointer(&r)), br)
+				deleteObject.Call(br)
+
+				setBkMode.Call(memDC, 1)
+				var oldFont uintptr
+				if termFont != 0 {
+					oldFont, _, _ = selectObject.Call(memDC, termFont)
+				}
+
+				if sess != nil && frameReady {
+					cc, rr, cells, buf, cur := frameCols, frameRows, frameCells, frameText, frameCursor
+					var brush uintptr
+					var brushColor uint32
+					for y := uint16(0); y < rr; y++ {
+						for x := uint16(0); x < cc; x++ {
+							cell := cells[int(y)*int(cc)+int(x)]
+							bg := uint32(cell.Background.R) | uint32(cell.Background.G)<<8 | uint32(cell.Background.B)<<16
+							if cell.Selected != 0 {
+								bg = 0x00a05028
 							}
-							brush, _, _ = createBrush.Call(uintptr(bg))
-							brushColor = bg
-						}
-						cr := RECT{Left: int32(x) * 9, Top: int32(y) * 18, Right: int32(x+1) * 9, Bottom: int32(y+1) * 18}
-						fillRect.Call(hdc, uintptr(unsafe.Pointer(&cr)), brush)
-						end := uint64(cell.TextOffset) + uint64(cell.TextLength)
-						if cell.TextLength > 0 && end <= uint64(len(buf)) {
-							fg := uint32(cell.Foreground.R) | uint32(cell.Foreground.G)<<8 | uint32(cell.Foreground.B)<<16
-							setTextColor.Call(hdc, uintptr(fg))
-							p, _ := syscall.UTF16FromString(string(buf[cell.TextOffset:uint32(end)]))
-							if len(p) > 1 {
-								textOut.Call(hdc, uintptr(int(x)*9), uintptr(int(y)*18+2), uintptr(unsafe.Pointer(&p[0])), uintptr(len(p)-1))
+							if brush == 0 || bg != brushColor {
+								if brush != 0 {
+									deleteObject.Call(brush)
+								}
+								brush, _, _ = createBrush.Call(uintptr(bg))
+								brushColor = bg
+							}
+							cr := RECT{Left: int32(x) * 9, Top: int32(y) * 18, Right: int32(x+1) * 9, Bottom: int32(y+1) * 18}
+							fillRect.Call(memDC, uintptr(unsafe.Pointer(&cr)), brush)
+							end := uint64(cell.TextOffset) + uint64(cell.TextLength)
+							if cell.TextLength > 0 && end <= uint64(len(buf)) {
+								fg := uint32(cell.Foreground.R) | uint32(cell.Foreground.G)<<8 | uint32(cell.Foreground.B)<<16
+								setTextColor.Call(memDC, uintptr(fg))
+								p, _ := syscall.UTF16FromString(string(buf[cell.TextOffset:uint32(end)]))
+								if len(p) > 1 {
+									textOut.Call(memDC, uintptr(int(x)*9), uintptr(int(y)*18+2), uintptr(unsafe.Pointer(&p[0])), uintptr(len(p)-1))
+								}
 							}
 						}
 					}
+					if brush != 0 {
+						deleteObject.Call(brush)
+					}
+					if cur.Visible != 0 && cur.X < cc && cur.Y < rr {
+						caret, _, _ := createBrush.Call(0x00e8e8e8)
+						cr := RECT{Left: int32(cur.X) * 9, Top: int32(cur.Y) * 18, Right: int32(cur.X)*9 + 2, Bottom: int32(cur.Y+1) * 18}
+						fillRect.Call(memDC, uintptr(unsafe.Pointer(&cr)), caret)
+						deleteObject.Call(caret)
+					}
 				}
-				if brush != 0 {
-					deleteObject.Call(brush)
+
+				bitBlt.Call(hdc, 0, 0, uintptr(w), uintptr(h), memDC, 0, 0, srccopy)
+
+				if oldFont != 0 {
+					selectObject.Call(memDC, oldFont)
 				}
-				if cur.Visible != 0 && cur.X < cc && cur.Y < rr {
-					caret, _, _ := createBrush.Call(0x00e8e8e8)
-					cr := RECT{Left: int32(cur.X) * 9, Top: int32(cur.Y) * 18, Right: int32(cur.X)*9 + 2, Bottom: int32(cur.Y+1) * 18}
-					fillRect.Call(hdc, uintptr(unsafe.Pointer(&cr)), caret)
-					deleteObject.Call(caret)
-				}
+				selectObject.Call(memDC, oldBmp)
+				deleteObject.Call(memBmp)
 			}
+			deleteDC.Call(memDC)
 		}
 		endPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
@@ -250,6 +285,10 @@ func wndproc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		if sess != nil {
 			sess.Close()
 			sess = nil
+		}
+		if termFont != 0 {
+			deleteObject.Call(termFont)
+			termFont = 0
 		}
 		postQuit.Call(0)
 		return 0
@@ -297,13 +336,14 @@ func main() {
 	}()
 	cb := syscall.NewCallback(wndproc)
 	name := wide("TerminalLibghostyEmbedded")
-	wc := WNDCLASS{WndProc: cb, Background: 6, ClassName: name}
+	wc := WNDCLASS{WndProc: cb, Background: 0, ClassName: name}
 	if r, _, e := registerClass.Call(uintptr(unsafe.Pointer(&wc))); r == 0 && e != syscall.Errno(1410) {
 		log.Printf("RegisterClass failed: %v", e)
 		sess.Close()
 		sess = nil
 		return
 	}
+	termFont, _, _ = createFont.Call(18, 9, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, uintptr(1|(3<<4)), uintptr(unsafe.Pointer(wide("Consolas"))))
 	var pr RECT
 	getClientRect.Call(parent, uintptr(unsafe.Pointer(&pr)))
 	hwnd, _, e := createWindow.Call(0, uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(wide("SSH Terminal"))), wsChild|wsVisible|wsTabStop, 0, 0, uintptr(max(pr.Right-pr.Left, 1)), uintptr(max(pr.Bottom-pr.Top, 1)), parent, 0, 0, 0)
@@ -317,7 +357,7 @@ func main() {
 	showWindow.Call(hwnd, 5)
 	updateWindow.Call(hwnd)
 	u.NewProc("SetFocus").Call(hwnd)
-	setTimer.Call(hwnd, 1, 75, 0)
+	setTimer.Call(hwnd, 1, 25, 0)
 	var m MSG
 	for {
 		r, _, _ := getMessage.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)

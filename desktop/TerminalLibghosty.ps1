@@ -62,8 +62,9 @@ $connectButton=Button 'CONNECT  →' 232 350 190 {
  $native=Join-Path $root 'build\native-local'
  $hostExe=Join-Path $root 'dist\terminal-host.exe'
  if(!(Test-Path (Join-Path $native 'terminal_libghosty_session.dll')) -or !(Test-Path (Join-Path $native 'ghostty-vt.dll'))){Write-Log "Native DLL check failed: $native" 'ERROR';$st.Text='Native Ghostty DLLs not found. Build native\ first.';return}
- if(!(Test-Path $hostExe)){
-  try{Write-Log 'terminal-host.exe missing; building it now.';New-Item -ItemType Directory -Force (Split-Path $hostExe)|Out-Null;$oldDir=Get-Location;Set-Location $root;$env:TERMINAL_LIBGHOSTY_NATIVE_DIR=$native;& go build -ldflags='-H=windowsgui' -o $hostExe ./cmd/terminal-host;if($LASTEXITCODE -ne 0){throw "Go terminal host build failed (exit=$LASTEXITCODE)"};Set-Location $oldDir;Write-Log 'terminal-host.exe build succeeded.'}catch{Write-Log "Host build failed: $($_.Exception.Message)" 'ERROR';$st.Text=$_.Exception.Message;return}
+ $hostSrc=Join-Path $root 'cmd\terminal-host\main_windows.go'
+ if(!(Test-Path $hostExe) -or ((Get-Item $hostSrc).LastWriteTime -gt (Get-Item $hostExe).LastWriteTime)){
+  try{Write-Log 'terminal-host.exe missing or outdated; building it now.';New-Item -ItemType Directory -Force (Split-Path $hostExe)|Out-Null;$oldDir=Get-Location;Set-Location $root;$env:TERMINAL_LIBGHOSTY_NATIVE_DIR=$native;& go build -ldflags='-H=windowsgui' -o $hostExe ./cmd/terminal-host;if($LASTEXITCODE -ne 0){throw "Go terminal host build failed (exit=$LASTEXITCODE)"};Set-Location $oldDir;Write-Log 'terminal-host.exe build succeeded.'}catch{Write-Log "Host build failed: $($_.Exception.Message)" 'ERROR';$st.Text=$_.Exception.Message;return}
  }
  $env:TERMINAL_LIBGHOSTY_NATIVE_DIR=$native
  $parentHandle='0x{0:X}' -f $termHost.Handle.ToInt64()
