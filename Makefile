@@ -11,5 +11,5 @@ test:
 
 build:
 	$(CGO_ENV) go build -ldflags="-H=windowsgui" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
-	$(CGO_ENV) go build -ldflags="-H=windowsgui" -o dist/terminal-host.exe ./cmd/terminal-host
 	cmake -E copy_if_different build/native-local/ghostty-vt.dll dist/ghostty-vt.dll
+	$(if $(filter Windows_NT,$(OS)),powershell -NoProfile -Command "Remove-Item dist/terminal-host.exe -ErrorAction SilentlyContinue",rm -f dist/terminal-host.exe)

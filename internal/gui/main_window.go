@@ -4,15 +4,15 @@ package gui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
-
-	"github.com/bombless/terminal-libghosty/internal/ssh"
-	"github.com/bombless/terminal-libghosty/internal/terminal"
 )
 
 func init() {
@@ -61,15 +61,15 @@ var (
 )
 
 type MainWindow struct {
-	hwnd        uintptr
-	bgBrush     uintptr
-	panelBrush  uintptr
-	editBrush   uintptr
-	btnBrush    uintptr
-	headerFont  uintptr
-	subFont     uintptr
-	normalFont  uintptr
-	btnFont     uintptr
+	hwnd       uintptr
+	bgBrush    uintptr
+	panelBrush uintptr
+	editBrush  uintptr
+	btnBrush   uintptr
+	headerFont uintptr
+	subFont    uintptr
+	normalFont uintptr
+	btnFont    uintptr
 
 	// Child controls
 	hHeader     uintptr
@@ -94,6 +94,7 @@ type MainWindow struct {
 	hBtnDisconnect uintptr
 	termView       *TerminalView
 	connected      bool
+	serverCmd      *exec.Cmd
 
 	hStatus  uintptr
 	profiles []Profile
@@ -602,60 +603,41 @@ func (mw *MainWindow) setProfileFormVisible(visible bool) {
 }
 
 func (mw *MainWindow) startConnect(target, identity string, port int) {
-	var err error
-	if mw.termView == nil {
-		mw.termView, err = NewTerminalView(mw.hRightPanel, func(code uint32) {
-			mw.setStatus(fmt.Sprintf("SSH session ended (exit code: %d)", code))
-		})
-		if err != nil {
-			mw.setStatus(fmt.Sprintf("Direct2D initialization failed: %v", err))
-			return
-		}
-	}
-
-	var r rect
-	procGetClientRect.Call(mw.hRightPanel, uintptr(unsafe.Pointer(&r)))
-	w := int(r.Right - r.Left)
-	h := int(r.Bottom - r.Top)
-	mw.termView.SetBounds(10, 52, w-20, h-62)
-
-	mw.setStatus(fmt.Sprintf("Connecting to %s via Direct2D terminal...", target))
-
-	opts := ssh.Options{
-		Target:       target,
-		IdentityFile: identity,
-		Port:         port,
-	}
-
-	cols, rows := mw.termView.cols, mw.termView.rows
-	if cols < 1 {
-		cols = 80
-	}
-	if rows < 1 {
-		rows = 24
-	}
-
-	sess, err := terminal.StartSSH(opts, cols, rows)
-	if err != nil {
-		mw.setStatus(fmt.Sprintf("SSH connection failed: %v", err))
+	if mw.serverCmd != nil && mw.serverCmd.Process != nil {
+		mw.setStatus("A terminal server is already running.")
 		return
 	}
-
+	exe, err := os.Executable()
+	if err != nil {
+		mw.setStatus(fmt.Sprintf("Cannot locate application executable: %v", err))
+		return
+	}
+	args := []string{"--server", "--parent", fmt.Sprintf("0x%X", mw.hRightPanel), "--ssh", target}
+	if identity != "" {
+		args = append(args, "--identity", identity)
+	}
+	if port > 0 {
+		args = append(args, "--port", strconv.Itoa(port))
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = filepath.Dir(exe)
+	if err := cmd.Start(); err != nil {
+		mw.setStatus(fmt.Sprintf("Failed to start terminal server: %v", err))
+		return
+	}
+	mw.serverCmd = cmd
+	go func() { _ = cmd.Wait() }()
 	mw.connected = true
-	mw.termView.AttachSession(sess)
 	mw.setProfileFormVisible(false)
 	procShowWindow.Call(mw.hBtnDisconnect, 5) // SW_SHOW
-	mw.termView.Show(true)
-	mw.termView.Focus()
-
-	mw.setStatus(fmt.Sprintf("Connected to %s · Direct2D hardware acceleration active", target))
+	mw.setStatus(fmt.Sprintf("Terminal server started for %s · forked process active", target))
 }
 
 func (mw *MainWindow) stopConnect() {
 	mw.connected = false
-	if mw.termView != nil {
-		mw.termView.CloseSession()
-		mw.termView.Show(false)
+	if mw.serverCmd != nil && mw.serverCmd.Process != nil {
+		_ = mw.serverCmd.Process.Kill()
+		mw.serverCmd = nil
 	}
 	procShowWindow.Call(mw.hBtnDisconnect, 0) // SW_HIDE
 	mw.setProfileFormVisible(true)
@@ -669,6 +651,10 @@ func (mw *MainWindow) Show() {
 }
 
 func (mw *MainWindow) cleanup() {
+	if mw.serverCmd != nil && mw.serverCmd.Process != nil {
+		_ = mw.serverCmd.Process.Kill()
+		mw.serverCmd = nil
+	}
 	if mw.termView != nil {
 		mw.termView.CloseSession()
 		mw.termView.Destroy()
