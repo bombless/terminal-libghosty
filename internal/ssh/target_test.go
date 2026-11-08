@@ -14,7 +14,21 @@ func TestBuildArgs(t *testing.T) {
 }
 
 func TestRejectUnsafeTargets(t *testing.T) {
-	for _, target := range []string{"", "example.com", "-oProxyCommand=bad@host", "u@host;calc", "u@host\\n", "u@host:0", "u@[::1"} {
+	for _, target := range []string{"", "example.com", "-oProxyCommand=bad@host", "u@host;calc", "u@host\\n", "u@host\nname", "u@host\n", "u@host\x00name", "u@host:0", "u@host:65536", "u@[::1"} {
 		if _, err := BuildArgs(Options{Target:target}); err == nil { t.Errorf("accepted unsafe target %q", target) }
+	}
+}
+
+func TestBuildArgsAllowsOrdinaryHostCharacters(t *testing.T) {
+	got, err := BuildArgs(Options{Target: "runner@node10.example.net"})
+	if err != nil { t.Fatalf("valid hostname rejected: %v", err) }
+	if got[len(got)-1] != "runner@node10.example.net" { t.Fatalf("unexpected destination: %#v", got) }
+}
+
+func TestRejectControlCharactersInIdentityPath(t *testing.T) {
+	for _, path := range []string{"key\nfile", "key\rfile", "key\x00file"} {
+		if _, err := BuildArgs(Options{Target: "user@example.com", IdentityFile: path}); err == nil {
+			t.Errorf("accepted identity path with control character %q", path)
+		}
 	}
 }

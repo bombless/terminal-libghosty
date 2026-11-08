@@ -1,10 +1,13 @@
-.PHONY: test build build-gccgo
+.PHONY: test build
+
+ifeq ($(OS),Windows_NT)
+CGO_ENV = set CGO_ENABLED=1&&
+else
+CGO_ENV = CGO_ENABLED=1
+endif
 
 test:
-	go test ./...
+	$(CGO_ENV) go test ./...
 
 build:
-	go build -ldflags="-H=windowsgui" -o dist/terminal-libghosty.exe ./cmd/desktop
-
-build-gccgo:
-	go build -compiler gccgo -o dist/terminal-libghosty.exe ./cmd/desktop
+	$(CGO_ENV) go build -ldflags="-H=windowsgui" -o dist/terminal-libghosty.exe ./cmd/desktop

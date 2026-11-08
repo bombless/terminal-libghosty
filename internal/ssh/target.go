@@ -21,8 +21,11 @@ type Options struct {
 // BuildArgs returns argv for CreateProcess/exec.Command. It deliberately does
 // not invoke a shell and never disables SSH host-key verification.
 func BuildArgs(o Options) ([]string, error) {
+	if strings.ContainsAny(o.Target, "\r\n\x00") {
+		return nil, fmt.Errorf("target must be user@host[:port]")
+	}
 	target := strings.TrimSpace(o.Target)
-	if target == "" || strings.ContainsAny(target, "`r`n`0") || strings.Contains(target, " ") {
+	if target == "" || strings.Contains(target, " ") {
 		return nil, fmt.Errorf("target must be user@host[:port]")
 	}
 	parts := strings.Split(target, "@")
@@ -37,8 +40,8 @@ func BuildArgs(o Options) ([]string, error) {
 		if err == nil {
 			host = h
 			parsed, e := strconv.Atoi(p)
-			if e != nil {
-				return nil, fmt.Errorf("invalid port")
+			if e != nil || parsed < 1 || parsed > 65535 {
+				return nil, fmt.Errorf("port must be between 1 and 65535")
 			}
 			if port != 0 && port != parsed {
 				return nil, fmt.Errorf("conflicting ports")
@@ -56,8 +59,8 @@ func BuildArgs(o Options) ([]string, error) {
 		}
 		host = h
 		parsed, err := strconv.Atoi(p)
-		if err != nil {
-			return nil, fmt.Errorf("invalid port")
+		if err != nil || parsed < 1 || parsed > 65535 {
+			return nil, fmt.Errorf("port must be between 1 and 65535")
 		}
 		if port != 0 && port != parsed {
 			return nil, fmt.Errorf("conflicting ports")
@@ -75,7 +78,7 @@ func BuildArgs(o Options) ([]string, error) {
 	}
 	args := []string{"-tt", "-o", "RequestTTY=force", "-o", "StrictHostKeyChecking=yes"}
 	if o.IdentityFile != "" {
-		if strings.ContainsAny(o.IdentityFile, "`r`n`0") {
+		if strings.ContainsAny(o.IdentityFile, "\r\n\x00") {
 			return nil, fmt.Errorf("invalid identity file path")
 		}
 		args = append(args, "-i", filepath.Clean(o.IdentityFile))
