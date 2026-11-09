@@ -40,6 +40,7 @@ var (
 	procGetWindowTextW       = u32.NewProc("GetWindowTextW")
 	procGetWindowTextLengthW = u32.NewProc("GetWindowTextLengthW")
 	procPostQuitMessage      = u32.NewProc("PostQuitMessage")
+	procPostMessageW         = u32.NewProc("PostMessageW")
 	procGetMessageW          = u32.NewProc("GetMessageW")
 	procTranslateMessage     = u32.NewProc("TranslateMessage")
 	procDispatchMessageW     = u32.NewProc("DispatchMessageW")

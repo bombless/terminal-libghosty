@@ -4,9 +4,6 @@ package gui
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -20,7 +17,9 @@ func init() {
 }
 
 const (
-	mainWindowClassName = "TerminalLibghostyMainWindow"
+	mainWindowClassName  = "TerminalLibghostyMainWindow"
+	panelWindowClassName = "TerminalLibghostyPanel"
+	tabStripClassName    = "TerminalLibghostyTabStrip"
 
 	// Control IDs
 	idListProfiles   = 1001
@@ -31,10 +30,11 @@ const (
 	idBtnSave        = 1006
 	idBtnDelete      = 1007
 	idBtnConnect     = 1008
-	idBtnDisconnect  = 1009
 	idHeaderLabel    = 1011
 	idSubheaderLabel = 1012
 	idBtnToggleList  = 1013
+	idBtnLocalShell  = 1014
+	idBtnNewSSH      = 1015
 
 	lbsNotify     = 0x0001
 	wsVScroll     = 0x00200000
@@ -46,6 +46,7 @@ const (
 	lbGetcursel    = 0x0188
 	lbSetcursel    = 0x0186
 	lbnSelchange   = 1
+	lbnDblclk      = 2
 
 	dtCenter     = 0x0001
 	dtVcenter    = 0x0004
@@ -77,8 +78,17 @@ type MainWindow struct {
 	hSub           uintptr
 	hList          uintptr
 	hRightPanel    uintptr
+	hTabStrip      uintptr
+	hConfigPanel   uintptr
 	hBtnToggleList uintptr
+	hBtnNewSSH     uintptr
+	hBtnLocalShell uintptr
 	listCollapsed  bool
+
+	// Session tabs; tabs[0] is the always-present SSH config form.
+	tabs      []*sessionTab
+	activeTab int
+	nextTabID uint32
 
 	// Profile fields
 	hLblName     uintptr
@@ -92,12 +102,6 @@ type MainWindow struct {
 	hBtnSave     uintptr
 	hBtnDelete   uintptr
 	hBtnConnect  uintptr
-
-	// Terminal mode controls
-	hBtnDisconnect uintptr
-	termView       *TerminalView
-	connected      bool
-	serverCmd      *exec.Cmd
 
 	profiles []Profile
 }
@@ -169,8 +173,10 @@ func mainWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 				btnText = "CONNECT  →"
 			case idBtnDelete:
 				btnText = "DELETE"
-			case idBtnDisconnect:
-				btnText = "← BACK / DISCONNECT"
+			case idBtnNewSSH:
+				btnText = "NEW SSH  +"
+			case idBtnLocalShell:
+				btnText = "NEW PWSH  +"
 			case idBtnToggleList:
 				if mw.listCollapsed {
 					btnText = "SHOW LIST  ▶"
@@ -214,16 +220,16 @@ func mainWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		}
 		return 0
 
-	case wmSetFocus:
-		if mw != nil && mw.connected && mw.termView != nil {
-			mw.termView.Focus()
-			return 0
+	case wmAppSessionExit:
+		if mw != nil {
+			mw.closeTabByID(uint32(w))
 		}
+		return 0
+
+	case wmSetFocus:
+		return 0
 
 	case wmClose:
-		if mw != nil && mw.termView != nil {
-			mw.termView.CloseSession()
-		}
 		procDestroyWindow.Call(hwnd)
 		return 0
 
@@ -299,7 +305,7 @@ func NewMainWindow() (*MainWindow, error) {
 
 	// Register panel window class
 	panelCb := syscall.NewCallback(panelWndProc)
-	panelClsName := utf16Ptr("TerminalLibghostyPanel")
+	panelClsName := utf16Ptr(panelWindowClassName)
 	panelBrush, _, _ := procCreateSolidBrush.Call(0x002C211B) // #1B212C
 	pwc := wndClass{
 		WndProc:    panelCb,
@@ -308,6 +314,16 @@ func NewMainWindow() (*MainWindow, error) {
 		Cursor:     cursor,
 	}
 	procRegisterClassW.Call(uintptr(unsafe.Pointer(&pwc)))
+
+	// Register tab strip window class
+	tabCb := syscall.NewCallback(tabStripWndProc)
+	tabClsName := utf16Ptr(tabStripClassName)
+	twc := wndClass{
+		WndProc:   tabCb,
+		ClassName: tabClsName,
+		Cursor:    cursor,
+	}
+	procRegisterClassW.Call(uintptr(unsafe.Pointer(&twc)))
 
 	editBrush, _, _ := procCreateSolidBrush.Call(0x001A130F) // #0F131A
 	btnBrush, _, _ := procCreateSolidBrush.Call(0x00D27030)  // #3070D2
@@ -366,12 +382,18 @@ func (mw *MainWindow) createControls() {
 	)
 	procSendMessageW.Call(mw.hSub, 0x0030, mw.subFont, 1)
 
-	// List collapse toggle (positioned by layout)
-	mw.hBtnToggleList, _, _ = procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(utf16Ptr("BUTTON"))), uintptr(unsafe.Pointer(utf16Ptr("HIDE LIST"))),
-		wsChild|wsVisible|wsTabStop|bsOwnerdraw,
-		0, 0, 160, 34, mw.hwnd, idBtnToggleList, 0, 0,
-	)
+	// Top bar buttons (positioned by layout)
+	createTopBtn := func(text string, id uintptr) uintptr {
+		b, _, _ := procCreateWindowExW.Call(
+			0, uintptr(unsafe.Pointer(utf16Ptr("BUTTON"))), uintptr(unsafe.Pointer(utf16Ptr(text))),
+			wsChild|wsVisible|wsTabStop|bsOwnerdraw,
+			0, 0, 160, 34, mw.hwnd, id, 0, 0,
+		)
+		return b
+	}
+	mw.hBtnNewSSH = createTopBtn("NEW SSH  +", idBtnNewSSH)
+	mw.hBtnLocalShell = createTopBtn("NEW PWSH  +", idBtnLocalShell)
+	mw.hBtnToggleList = createTopBtn("HIDE LIST", idBtnToggleList)
 
 	// Profiles ListBox
 	mw.hList, _, _ = procCreateWindowExW.Call(
@@ -389,18 +411,31 @@ func (mw *MainWindow) createControls() {
 	)
 	procSetWindowLongPtrW.Call(mw.hRightPanel, uintptr(gwlpUserData), uintptr(unsafe.Pointer(mw)))
 
-	// Form fields inside Right Panel with unique IDs
+	// Tab strip and tab content area inside the right panel
+	mw.hTabStrip, _, _ = procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(utf16Ptr(tabStripClassName))), 0,
+		wsChild|wsVisible, 0, 0, 400, 40, mw.hRightPanel, 0, 0, 0,
+	)
+	procSetWindowLongPtrW.Call(mw.hTabStrip, uintptr(gwlpUserData), uintptr(unsafe.Pointer(mw)))
+
+	mw.hConfigPanel, _, _ = procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(utf16Ptr(panelWindowClassName))), 0,
+		wsChild|wsVisible|wsClipChildren, 0, 40, 400, 500, mw.hRightPanel, 0, 0, 0,
+	)
+	procSetWindowLongPtrW.Call(mw.hConfigPanel, uintptr(gwlpUserData), uintptr(unsafe.Pointer(mw)))
+
+	// Form fields inside the SSH config tab
 	createField := func(caption string, y int, id uintptr) (uintptr, uintptr) {
 		hLbl, _, _ := procCreateWindowExW.Call(
 			0, uintptr(unsafe.Pointer(utf16Ptr("STATIC"))), uintptr(unsafe.Pointer(utf16Ptr(caption))),
-			wsChild|wsVisible, 24, uintptr(y), 420, 22, mw.hRightPanel, 0, 0, 0,
+			wsChild|wsVisible, 24, uintptr(y), 420, 22, mw.hConfigPanel, 0, 0, 0,
 		)
 		procSendMessageW.Call(hLbl, 0x0030, mw.subFont, 1)
 
 		hEdit, _, _ := procCreateWindowExW.Call(
 			0x00000200, // WS_EX_CLIENTEDGE
 			uintptr(unsafe.Pointer(utf16Ptr("EDIT"))), 0,
-			wsChild|wsVisible|wsTabStop|esAutohscroll, 24, uintptr(y+25), 420, 30, mw.hRightPanel, id, 0, 0,
+			wsChild|wsVisible|wsTabStop|esAutohscroll, 24, uintptr(y+25), 420, 30, mw.hConfigPanel, id, 0, 0,
 		)
 		procSendMessageW.Call(hEdit, 0x0030, mw.normalFont, 1)
 		return hLbl, hEdit
@@ -411,13 +446,13 @@ func (mw *MainWindow) createControls() {
 	mw.hLblPort, mw.hEditPort = createField("PORT OVERRIDE (OPTIONAL)", 170, idEditPort)
 	mw.hLblIdentity, mw.hEditIdent = createField("PRIVATE KEY FILE (OPTIONAL)", 245, idEditIdentity)
 
-	// Buttons inside Right Panel
+	// Buttons inside the SSH config tab
 	createBtn := func(text string, x, y, w, h int, id uintptr) uintptr {
 		b, _, _ := procCreateWindowExW.Call(
 			0, uintptr(unsafe.Pointer(utf16Ptr("BUTTON"))), uintptr(unsafe.Pointer(utf16Ptr(text))),
 			wsChild|wsVisible|wsTabStop|bsOwnerdraw,
 			uintptr(x), uintptr(y), uintptr(w), uintptr(h),
-			mw.hRightPanel, id, 0, 0,
+			mw.hConfigPanel, id, 0, 0,
 		)
 		return b
 	}
@@ -426,13 +461,8 @@ func (mw *MainWindow) createControls() {
 	mw.hBtnConnect = createBtn("CONNECT  →", 232, 340, 190, 42, idBtnConnect)
 	mw.hBtnDelete = createBtn("DELETE", 24, 395, 130, 36, idBtnDelete)
 
-	// Disconnect button in the top bar, left of the list toggle (hidden by default)
-	mw.hBtnDisconnect, _, _ = procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(utf16Ptr("BUTTON"))), uintptr(unsafe.Pointer(utf16Ptr("← BACK / DISCONNECT"))),
-		wsChild|wsTabStop|bsOwnerdraw,
-		0, 0, 210, 34, mw.hwnd, idBtnDisconnect, 0, 0,
-	)
-	procShowWindow.Call(mw.hBtnDisconnect, 0) // SW_HIDE
+	mw.tabs = []*sessionTab{{kind: tabConfig, title: "SSH CONFIG", container: mw.hConfigPanel}}
+	mw.activeTab = 0
 }
 
 func (mw *MainWindow) layout() {
@@ -453,27 +483,31 @@ func (mw *MainWindow) layout() {
 		contentH = 300
 	}
 
-	// Collapse toggle at top right, opposite the header text
-	toggleW, toggleH := 160, 34
-	toggleX := width - 28 - toggleW
-	if toggleX < 28 {
-		toggleX = 28
+	// Top bar buttons, right aligned: NEW SSH, NEW PWSH, HIDE/SHOW LIST
+	btnY, btnH := 24, 34
+	const (
+		hideW = 160
+		pwshW = 170
+		sshW  = 150
+		gapW  = 12
+	)
+	x := width - 28 - hideW
+	if x < 28 {
+		x = 28
 	}
-	procMoveWindow.Call(mw.hBtnToggleList, uintptr(toggleX), 24, uintptr(toggleW), uintptr(toggleH), 1)
+	procMoveWindow.Call(mw.hBtnToggleList, uintptr(x), uintptr(btnY), hideW, uintptr(btnH), 1)
+	x -= gapW + pwshW
+	if x < 28 {
+		x = 28
+	}
+	procMoveWindow.Call(mw.hBtnLocalShell, uintptr(x), uintptr(btnY), pwshW, uintptr(btnH), 1)
+	x -= gapW + sshW
+	if x < 28 {
+		x = 28
+	}
+	procMoveWindow.Call(mw.hBtnNewSSH, uintptr(x), uintptr(btnY), sshW, uintptr(btnH), 1)
 
-	// Disconnect button sits to the left of the toggle
-	discW := 210
-	discX := toggleX - 12 - discW
-	if discX < 28 {
-		discX = 28
-	}
-	procMoveWindow.Call(mw.hBtnDisconnect, uintptr(discX), 24, uintptr(discW), 34, 1)
-
-	headerRight := toggleX
-	if mw.connected {
-		headerRight = discX
-	}
-	headerW := headerRight - 28 - 20
+	headerW := x - 28 - 20
 	if headerW < 200 {
 		headerW = 200
 	}
@@ -492,12 +526,15 @@ func (mw *MainWindow) layout() {
 		rightW = 350
 	}
 
-	// Right Panel
+	// Right Panel with tab strip and tab content
 	procMoveWindow.Call(mw.hRightPanel, uintptr(rightX), 112, uintptr(rightW), uintptr(contentH), 1)
-
-	// Terminal View inside right panel if created
-	if mw.termView != nil {
-		mw.termView.SetBounds(10, 52, rightW-20, contentH-62)
+	procMoveWindow.Call(mw.hTabStrip, 0, 0, uintptr(rightW), uintptr(tabStripHeight), 1)
+	tabContentH := contentH - tabStripHeight
+	if tabContentH < 100 {
+		tabContentH = 100
+	}
+	for _, t := range mw.tabs {
+		procMoveWindow.Call(t.container, 0, uintptr(tabStripHeight), uintptr(rightW), uintptr(tabContentH), 1)
 	}
 }
 
@@ -527,6 +564,7 @@ func (mw *MainWindow) selectProfile(idx int) {
 		setWindowText(mw.hEditPort, "")
 	}
 	setWindowText(mw.hEditIdent, p.Identity)
+	mw.activateTab(0)
 }
 
 func (mw *MainWindow) setStatus(text string) {
@@ -536,9 +574,13 @@ func (mw *MainWindow) setStatus(text string) {
 func (mw *MainWindow) handleCommand(id, code uint16) {
 	switch id {
 	case idListProfiles:
-		if code == lbnSelchange {
+		switch code {
+		case lbnSelchange:
 			idx, _, _ := procSendMessageW.Call(mw.hList, lbGetcursel, 0, 0)
 			mw.selectProfile(int(idx))
+		case lbnDblclk:
+			idx, _, _ := procSendMessageW.Call(mw.hList, lbGetcursel, 0, 0)
+			mw.openProfileSession(int(idx))
 		}
 
 	case idBtnSave:
@@ -614,10 +656,13 @@ func (mw *MainWindow) handleCommand(id, code uint16) {
 		}
 		identity := strings.TrimSpace(getWindowText(mw.hEditIdent))
 
-		mw.startConnect(target, identity, port)
+		mw.startSSHSession(target, identity, port, target)
 
-	case idBtnDisconnect:
-		mw.stopConnect()
+	case idBtnNewSSH:
+		mw.newSSHRequested()
+
+	case idBtnLocalShell:
+		mw.startPowerShellSession()
 
 	case idBtnToggleList:
 		mw.toggleList()
@@ -633,80 +678,31 @@ func (mw *MainWindow) toggleList() {
 	procShowWindow.Call(mw.hList, cmd)
 	mw.layout()
 	procInvalidateRect.Call(mw.hBtnToggleList, 0, 0)
-	if mw.connected {
-		if mw.listCollapsed {
-			mw.setStatus("")
-		}
-	} else if mw.listCollapsed {
+	if mw.listCollapsed {
 		mw.setStatus("Connection list collapsed.")
 	} else {
 		mw.setStatus("Connection list expanded.")
 	}
 }
 
-func (mw *MainWindow) setProfileFormVisible(visible bool) {
-	cmd := 0
-	if visible {
-		cmd = 5 // SW_SHOW
-	}
-	procShowWindow.Call(mw.hLblName, uintptr(cmd))
-	procShowWindow.Call(mw.hEditName, uintptr(cmd))
-	procShowWindow.Call(mw.hLblTarget, uintptr(cmd))
-	procShowWindow.Call(mw.hEditTarget, uintptr(cmd))
-	procShowWindow.Call(mw.hLblPort, uintptr(cmd))
-	procShowWindow.Call(mw.hEditPort, uintptr(cmd))
-	procShowWindow.Call(mw.hLblIdentity, uintptr(cmd))
-	procShowWindow.Call(mw.hEditIdent, uintptr(cmd))
-	procShowWindow.Call(mw.hBtnSave, uintptr(cmd))
-	procShowWindow.Call(mw.hBtnConnect, uintptr(cmd))
-	procShowWindow.Call(mw.hBtnDelete, uintptr(cmd))
+func (mw *MainWindow) clearProfileForm() {
+	setWindowText(mw.hEditName, "")
+	setWindowText(mw.hEditTarget, "")
+	setWindowText(mw.hEditPort, "")
+	setWindowText(mw.hEditIdent, "")
+	procSetFocus.Call(mw.hEditName)
 }
 
-func (mw *MainWindow) startConnect(target, identity string, port int) {
-	if mw.serverCmd != nil && mw.serverCmd.Process != nil {
-		mw.setStatus("A terminal server is already running.")
+// newSSHRequested shows the SSH config tab; when it is already active the form
+// is cleared so the user can enter a new connection.
+func (mw *MainWindow) newSSHRequested() {
+	if mw.activeTab == 0 {
+		mw.clearProfileForm()
+		mw.setStatus("Enter SSH connection details.")
 		return
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		mw.setStatus(fmt.Sprintf("Cannot locate application executable: %v", err))
-		return
-	}
-	args := []string{"--server", "--parent", fmt.Sprintf("0x%X", mw.hRightPanel), "--ssh", target}
-	if identity != "" {
-		args = append(args, "--identity", identity)
-	}
-	if port > 0 {
-		args = append(args, "--port", strconv.Itoa(port))
-	}
-	cmd := exec.Command(exe, args...)
-	cmd.Dir = filepath.Dir(exe)
-	if err := cmd.Start(); err != nil {
-		mw.setStatus(fmt.Sprintf("Failed to start terminal server: %v", err))
-		return
-	}
-	mw.serverCmd = cmd
-	go func() { _ = cmd.Wait() }()
-	mw.connected = true
-	mw.setProfileFormVisible(false)
-	procShowWindow.Call(mw.hBtnDisconnect, 5) // SW_SHOW
-	if mw.listCollapsed {
-		mw.setStatus("")
-	} else {
-		mw.setStatus(fmt.Sprintf("Terminal server started for %s", target))
-	}
-}
-
-func (mw *MainWindow) stopConnect() {
-	mw.connected = false
-	if mw.serverCmd != nil && mw.serverCmd.Process != nil {
-		_ = mw.serverCmd.Process.Kill()
-		mw.serverCmd = nil
-	}
-	procShowWindow.Call(mw.hBtnDisconnect, 0) // SW_HIDE
-	mw.setProfileFormVisible(true)
-	mw.setStatus("Disconnected.")
-	procSetFocus.Call(mw.hEditTarget)
+	mw.activateTab(0)
+	mw.setStatus("SSH connection form.")
 }
 
 func (mw *MainWindow) Show() {
@@ -715,14 +711,11 @@ func (mw *MainWindow) Show() {
 }
 
 func (mw *MainWindow) cleanup() {
-	if mw.serverCmd != nil && mw.serverCmd.Process != nil {
-		_ = mw.serverCmd.Process.Kill()
-		mw.serverCmd = nil
-	}
-	if mw.termView != nil {
-		mw.termView.CloseSession()
-		mw.termView.Destroy()
-		mw.termView = nil
+	for _, t := range mw.tabs {
+		if t.serverCmd != nil && t.serverCmd.Process != nil {
+			_ = t.serverCmd.Process.Kill()
+			t.serverCmd = nil
+		}
 	}
 	if mw.bgBrush != 0 {
 		procDeleteObject.Call(mw.bgBrush)
@@ -751,10 +744,10 @@ func (mw *MainWindow) cleanup() {
 }
 
 func Run() error {
-	return RunWithOptions("", "", 0)
+	return RunWithOptions("", "", 0, "")
 }
 
-func RunWithOptions(target, identity string, port int) error {
+func RunWithOptions(target, identity string, port int, shell string) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -764,8 +757,10 @@ func RunWithOptions(target, identity string, port int) error {
 	}
 	mw.Show()
 
-	if target != "" {
-		mw.startConnect(target, identity, port)
+	if shell != "" {
+		mw.startPowerShellSession()
+	} else if target != "" {
+		mw.startSSHSession(target, identity, port, target)
 	}
 
 	var m msg
@@ -776,12 +771,6 @@ func RunWithOptions(target, identity string, port int) error {
 		}
 		if m.Message == wmKeyDown && m.WParam == vkF9 {
 			mw.toggleList()
-			continue
-		}
-		// If connected to terminal, let terminal process all keys directly
-		if mw.connected && mw.termView != nil {
-			procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
-			procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
 			continue
 		}
 

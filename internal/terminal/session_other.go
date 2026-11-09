@@ -12,6 +12,9 @@ type Session struct{}
 func StartSSH(ssh.Options, uint16, uint16) (*Session, error) {
 	return nil, fmt.Errorf("the native ConPTY/Ghostty session is only available on Windows")
 }
+func StartPowerShell(uint16, uint16) (*Session, error) {
+	return nil, fmt.Errorf("the native ConPTY/Ghostty session is only available on Windows")
+}
 func Start(string, []string, uint16, uint16) (*Session, error) {
 	return nil, fmt.Errorf("the native ConPTY/Ghostty session is only available on Windows")
 }

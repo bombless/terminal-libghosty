@@ -25,8 +25,9 @@ var (
 )
 
 // RunHost is the child-process server entry point. It embeds the terminal surface
-// into the parent window and owns the SSH/ConPTY session independently of the GUI.
-func RunHost(parentText, target, identity string, port int) error {
+// into the parent window and owns the SSH or local shell session independently of
+// the GUI.
+func RunHost(parentText, target, identity string, port int, shell string) error {
 	base := 10
 	if strings.HasPrefix(strings.ToLower(parentText), "0x") {
 		base = 16
@@ -75,20 +76,32 @@ func RunHost(parentText, target, identity string, port int) error {
 	view.Show(true)
 	view.Focus()
 
-	if target != "" {
-		cols, rows := uint16(width/9), uint16(height/18)
-		if cols < 1 {
-			cols = 80
-		}
-		if rows < 1 {
-			rows = 24
-		}
-		session, startErr := terminal.StartSSH(ssh.Options{
+	cols, rows := uint16(width/9), uint16(height/18)
+	if cols < 1 {
+		cols = 80
+	}
+	if rows < 1 {
+		rows = 24
+	}
+	var session *terminal.Session
+	var startErr error
+	switch {
+	case shell == "" && target != "":
+		session, startErr = terminal.StartSSH(ssh.Options{
 			Target: target, IdentityFile: identity, Port: port,
 		}, cols, rows)
 		if startErr != nil {
 			return fmt.Errorf("start SSH session: %w", startErr)
 		}
+	case strings.EqualFold(shell, "pwsh") || strings.EqualFold(shell, "pwsh.exe"):
+		session, startErr = terminal.StartPowerShell(cols, rows)
+		if startErr != nil {
+			return fmt.Errorf("start PowerShell session: %w", startErr)
+		}
+	case shell != "":
+		return fmt.Errorf("unsupported shell %q", shell)
+	}
+	if session != nil {
 		defer session.Close()
 		view.AttachSession(session)
 	}

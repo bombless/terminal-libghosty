@@ -44,6 +44,11 @@ func StartSSH(options ssh.Options, cols, rows uint16) (*Session, error) {
 	return Start("ssh.exe", args, cols, rows)
 }
 
+// StartPowerShell starts a local PowerShell 7 session (pwsh.exe) in ConPTY.
+func StartPowerShell(cols, rows uint16) (*Session, error) {
+	return Start("pwsh.exe", []string{"-NoLogo"}, cols, rows)
+}
+
 func Start(executable string, args []string, cols, rows uint16) (*Session, error) {
 	if executable == "" || cols == 0 || rows == 0 {
 		return nil, fmt.Errorf("invalid terminal executable or dimensions")

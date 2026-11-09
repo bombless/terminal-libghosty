@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/bombless/terminal-libghosty/internal/gui"
 )
@@ -14,7 +15,7 @@ func init() {
 }
 
 func main() {
-	var target, identity string
+	var target, identity, shell string
 	var port int
 	var server bool
 	var parent string
@@ -23,22 +24,33 @@ func main() {
 	flag.StringVar(&target, "ssh", "", "SSH target in user@host[:port] form")
 	flag.StringVar(&identity, "identity", "", "SSH private key file")
 	flag.IntVar(&port, "port", 0, "SSH port override")
+	flag.StringVar(&shell, "shell", "", "start a local shell instead of SSH (pwsh)")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "terminal-libghosty - Windows Direct2D libghostty SSH terminal\n\n")
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: terminal-libghosty [--ssh user@host[:port]] [--identity keyfile] [--port port]\n\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "terminal-libghosty - Windows Direct2D libghostty terminal\n\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: terminal-libghosty [--ssh user@host[:port]] [--identity keyfile] [--port port]\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "       terminal-libghosty --shell pwsh\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
+	if shell != "" && !strings.EqualFold(shell, "pwsh") && !strings.EqualFold(shell, "pwsh.exe") {
+		fmt.Fprintf(os.Stderr, "Unsupported shell %q: only pwsh is available\n", shell)
+		os.Exit(1)
+	}
+	if shell != "" && target != "" {
+		fmt.Fprintln(os.Stderr, "--shell and --ssh cannot be combined")
+		os.Exit(1)
+	}
+
 	if server {
-		if err := gui.RunHost(parent, target, identity, port); err != nil {
+		if err := gui.RunHost(parent, target, identity, port, shell); err != nil {
 			fmt.Fprintf(os.Stderr, "Terminal server error: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	if err := gui.RunWithOptions(target, identity, port); err != nil {
+	if err := gui.RunWithOptions(target, identity, port, shell); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting terminal: %v\n", err)
 		os.Exit(1)
 	}
