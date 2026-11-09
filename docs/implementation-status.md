@@ -69,8 +69,10 @@ Equivalent Go tests cover:
    style flags (bold/italic/underline), wide-cell layout, scrollback, and
    cursor shape/blink. The current host draws Ghostty cell colors, selection,
    graphemes, and a basic cursor.
-2. Complete keyboard handling for function keys and modifiers, then add IME,
+2. Complete keyboard handling for function keys and modifiers, then add
    focus reporting, mouse reporting, local selection, clipboard, and paste.
+   IME input (inline composition string, candidate positioning and commit into
+   the ConPTY session) is implemented for the Microsoft Pinyin IME.
 3. Test authenticated remote SSH sessions, host-key first-use/mismatch,
    remote disconnects, Unicode/TUI applications, alternate screen, resize,
    long output, and handle cleanup.
@@ -78,10 +80,10 @@ Equivalent Go tests cover:
 ## Scope
 
 The production SSH -> Go ConPTY -> Ghostty VT path is implemented and tested.
-The profile manager embeds a Win32 child host that calls `StartSSH()`. The
-host paints Ghostty cell snapshots (colors, selection, graphemes, cursor),
-routes basic text/navigation input, and resizes the session with its panel.
-This is a working first integration, not full terminal parity: IME, clipboard,
+The profile manager spawns one host per session tab; the host draws Ghostty
+cell snapshots (colors, selection, graphemes, cursor), routes text/navigation
+input plus IME composition, and tracks its tab container geometry.
+This is a working first integration, not full terminal parity: clipboard,
 mouse reporting/selection, scrollback, DPI/font handling, and advanced styles
 remain outstanding. A live authenticated remote session has not yet been
 accepted; current runtime tests use a closed loopback port.

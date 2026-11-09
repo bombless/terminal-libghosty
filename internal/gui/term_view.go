@@ -16,85 +16,113 @@ import (
 )
 
 var (
-	u32                      = syscall.NewLazyDLL("user32.dll")
-	g32                      = syscall.NewLazyDLL("gdi32.dll")
-	procCreateWindowExW      = u32.NewProc("CreateWindowExW")
-	procDestroyWindow        = u32.NewProc("DestroyWindow")
-	procRegisterClassW       = u32.NewProc("RegisterClassW")
-	procDefWindowProcW       = u32.NewProc("DefWindowProcW")
-	procShowWindow           = u32.NewProc("ShowWindow")
-	procUpdateWindow         = u32.NewProc("UpdateWindow")
-	procSetFocus             = u32.NewProc("SetFocus")
-	procBeginPaint           = u32.NewProc("BeginPaint")
-	procEndPaint             = u32.NewProc("EndPaint")
-	procGetClientRect        = u32.NewProc("GetClientRect")
-	procMoveWindow           = u32.NewProc("MoveWindow")
-	procSetTimer             = u32.NewProc("SetTimer")
-	procKillTimer            = u32.NewProc("KillTimer")
-	procInvalidateRect       = u32.NewProc("InvalidateRect")
-	procGetWindowLongPtrW    = u32.NewProc("GetWindowLongPtrW")
-	procSetWindowLongPtrW    = u32.NewProc("SetWindowLongPtrW")
-	procGetKeyState          = u32.NewProc("GetKeyState")
-	procSendMessageW         = u32.NewProc("SendMessageW")
-	procSetWindowTextW       = u32.NewProc("SetWindowTextW")
-	procGetWindowTextW       = u32.NewProc("GetWindowTextW")
-	procGetWindowTextLengthW = u32.NewProc("GetWindowTextLengthW")
-	procPostQuitMessage      = u32.NewProc("PostQuitMessage")
-	procPostMessageW         = u32.NewProc("PostMessageW")
-	procGetMessageW          = u32.NewProc("GetMessageW")
-	procTranslateMessage     = u32.NewProc("TranslateMessage")
-	procDispatchMessageW     = u32.NewProc("DispatchMessageW")
-	procEnableWindow         = u32.NewProc("EnableWindow")
-	procDrawTextW            = u32.NewProc("DrawTextW")
-	procFillRect             = u32.NewProc("FillRect")
-	procCreateSolidBrush     = g32.NewProc("CreateSolidBrush")
-	procDeleteObject         = g32.NewProc("DeleteObject")
-	procSetTextColor         = g32.NewProc("SetTextColor")
-	procSetBkColor           = g32.NewProc("SetBkColor")
-	procSetBkMode            = g32.NewProc("SetBkMode")
-	procCreateFontW          = g32.NewProc("CreateFontW")
-	procSelectObject         = g32.NewProc("SelectObject")
-	procGetCaretBlinkTime    = u32.NewProc("GetCaretBlinkTime")
+	u32                          = syscall.NewLazyDLL("user32.dll")
+	g32                          = syscall.NewLazyDLL("gdi32.dll")
+	imm32                        = syscall.NewLazyDLL("imm32.dll")
+	procCreateWindowExW          = u32.NewProc("CreateWindowExW")
+	procDestroyWindow            = u32.NewProc("DestroyWindow")
+	procRegisterClassW           = u32.NewProc("RegisterClassW")
+	procDefWindowProcW           = u32.NewProc("DefWindowProcW")
+	procShowWindow               = u32.NewProc("ShowWindow")
+	procUpdateWindow             = u32.NewProc("UpdateWindow")
+	procSetFocus                 = u32.NewProc("SetFocus")
+	procBeginPaint               = u32.NewProc("BeginPaint")
+	procEndPaint                 = u32.NewProc("EndPaint")
+	procGetClientRect            = u32.NewProc("GetClientRect")
+	procMoveWindow               = u32.NewProc("MoveWindow")
+	procSetTimer                 = u32.NewProc("SetTimer")
+	procKillTimer                = u32.NewProc("KillTimer")
+	procInvalidateRect           = u32.NewProc("InvalidateRect")
+	procGetWindowLongPtrW        = u32.NewProc("GetWindowLongPtrW")
+	procSetWindowLongPtrW        = u32.NewProc("SetWindowLongPtrW")
+	procGetKeyState              = u32.NewProc("GetKeyState")
+	procSendMessageW             = u32.NewProc("SendMessageW")
+	procSetWindowTextW           = u32.NewProc("SetWindowTextW")
+	procGetWindowTextW           = u32.NewProc("GetWindowTextW")
+	procGetWindowTextLengthW     = u32.NewProc("GetWindowTextLengthW")
+	procPostQuitMessage          = u32.NewProc("PostQuitMessage")
+	procPostMessageW             = u32.NewProc("PostMessageW")
+	procGetMessageW              = u32.NewProc("GetMessageW")
+	procTranslateMessage         = u32.NewProc("TranslateMessage")
+	procDispatchMessageW         = u32.NewProc("DispatchMessageW")
+	procEnableWindow             = u32.NewProc("EnableWindow")
+	procDrawTextW                = u32.NewProc("DrawTextW")
+	procFillRect                 = u32.NewProc("FillRect")
+	procCreateSolidBrush         = g32.NewProc("CreateSolidBrush")
+	procDeleteObject             = g32.NewProc("DeleteObject")
+	procSetTextColor             = g32.NewProc("SetTextColor")
+	procSetBkColor               = g32.NewProc("SetBkColor")
+	procSetBkMode                = g32.NewProc("SetBkMode")
+	procCreateFontW              = g32.NewProc("CreateFontW")
+	procSelectObject             = g32.NewProc("SelectObject")
+	procGetCaretBlinkTime        = u32.NewProc("GetCaretBlinkTime")
+	procClientToScreen           = u32.NewProc("ClientToScreen")
+	procGetAncestor              = u32.NewProc("GetAncestor")
+	procIsWindowVisible          = u32.NewProc("IsWindowVisible")
+	procIsIconic                 = u32.NewProc("IsIconic")
+	procSetForegroundWindow      = u32.NewProc("SetForegroundWindow")
+	procGetForegroundWindow      = u32.NewProc("GetForegroundWindow")
+	procAllowSetForegroundWindow = u32.NewProc("AllowSetForegroundWindow")
+
+	procImmGetContext            = imm32.NewProc("ImmGetContext")
+	procImmReleaseContext        = imm32.NewProc("ImmReleaseContext")
+	procImmGetCompositionStringW = imm32.NewProc("ImmGetCompositionStringW")
+	procImmSetCompositionWindow  = imm32.NewProc("ImmSetCompositionWindow")
+	procImmSetCompositionFontW   = imm32.NewProc("ImmSetCompositionFontW")
 )
 
 const (
-	gwlpUserData    = ^uintptr(20) // -21 in two's complement
-	wmDestroy       = 2
-	wmSize          = 5
-	wmSetFocus      = 7
-	wmKillFocus     = 8
-	wmPaint         = 15
-	wmClose         = 0x0010
-	wmEraseBkgnd    = 0x14
-	wmGetDlgCode    = 0x0087
-	wmKeyDown       = 0x100
-	wmChar          = 0x102
-	wmTimer         = 0x113
-	wmLButtonDown   = 0x201
-	wmCommand       = 0x0111
-	wmCtlColorStatic = 0x0138
-	wmCtlColorEdit  = 0x0133
-	wmCtlColorBtn   = 0x0135
-	wmCtlColorListbox = 0x0134
-	wmDrawItem      = 0x002B
+	gwlpUserData          = ^uintptr(20) // -21 in two's complement
+	wmDestroy             = 2
+	wmSize                = 5
+	wmSetFocus            = 7
+	wmKillFocus           = 8
+	wmPaint               = 15
+	wmClose               = 0x0010
+	wmEraseBkgnd          = 0x14
+	wmGetDlgCode          = 0x0087
+	wmKeyDown             = 0x100
+	wmChar                = 0x102
+	wmImeStartComposition = 0x010D
+	wmImeEndComposition   = 0x010E
+	wmImeComposition      = 0x010F
+	wmImeSetContext       = 0x0281
+	wmImeChar             = 0x0286
+	wmTimer               = 0x113
+	wmLButtonDown         = 0x201
+	wmCommand             = 0x0111
+	wmCtlColorStatic      = 0x0138
+	wmCtlColorEdit        = 0x0133
+	wmCtlColorBtn         = 0x0135
+	wmCtlColorListbox     = 0x0134
+	wmDrawItem            = 0x002B
 
 	dlgcWantAllKeys = 0x0004
 	dlgcWantArrows  = 0x0001
 	dlgcWantTab     = 0x0002
 	dlgcWantChars   = 0x0080
 
-	wsChild         = 0x40000000
-	wsVisible       = 0x10000000
-	wsTabStop       = 0x10000
-	wsClipChildren  = 0x02000000
-	wsClipSiblings  = 0x04000000
-	wsOverlapped    = 0x00000000
-	wsCaption       = 0x00C00000
-	wsSysMenu       = 0x00080000
-	wsMinimizeBox   = 0x00020000
-	wsMaximizeBox   = 0x00010000
-	wsThickFrame    = 0x00040000
+	wsChild            = 0x40000000
+	wsPopup            = 0x80000000
+	wsVisible          = 0x10000000
+	wsTabStop          = 0x10000
+	wsClipChildren     = 0x02000000
+	wsClipSiblings     = 0x04000000
+	wsOverlapped       = 0x00000000
+	wsCaption          = 0x00C00000
+	wsSysMenu          = 0x00080000
+	wsMinimizeBox      = 0x00020000
+	wsMaximizeBox      = 0x00010000
+	wsThickFrame       = 0x00040000
 	wsOverlappedWindow = wsOverlapped | wsCaption | wsSysMenu | wsThickFrame | wsMinimizeBox | wsMaximizeBox
+
+	swShowNoActivate = 4
+	gaRoot           = 2
+
+	gcsCompStr                 = 0x0008
+	gcsResultStr               = 0x0800
+	cfsPoint                   = 0x0002
+	iscShowUICompositionWindow = 0x80000000
 )
 
 type wndClass struct {
@@ -119,6 +147,29 @@ type paintStruct struct {
 
 type point struct {
 	X, Y int32
+}
+
+type compositionForm struct {
+	Style      uint32
+	CurrentPos point
+	Area       rect
+}
+
+type logFontW struct {
+	Height         int32
+	Width          int32
+	Escapement     int32
+	Orientation    int32
+	Weight         int32
+	Italic         byte
+	Underline      byte
+	StrikeOut      byte
+	CharSet        byte
+	OutPrecision   byte
+	ClipPrecision  byte
+	Quality        byte
+	PitchAndFamily byte
+	FaceName       [32]uint16
 }
 
 type msg struct {
@@ -165,6 +216,9 @@ type TerminalView struct {
 	lastBlinkToggle    time.Time
 	blinkInterval      time.Duration
 
+	preedit string
+	imeFont logFontW
+
 	processExited bool
 	onExit        func(code uint32)
 	mu            sync.Mutex
@@ -188,6 +242,41 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 	case wmGetDlgCode:
 		return dlgcWantAllKeys | dlgcWantArrows | dlgcWantTab | dlgcWantChars
 
+	case wmImeSetContext:
+		if tv != nil {
+			tv.positionComposition()
+		}
+		// The composition string is rendered inline; keep the IME from painting
+		// its own composition window on top of the terminal.
+		l &^= iscShowUICompositionWindow
+		r, _, _ := procDefWindowProcW.Call(hwnd, uintptr(m), w, l)
+		return r
+
+	case wmImeStartComposition:
+		if tv != nil {
+			tv.positionComposition()
+		}
+		return 0
+
+	case wmImeComposition:
+		if tv != nil {
+			tv.handleComposition(l)
+		}
+		return 0
+
+	case wmImeChar:
+		if tv != nil && tv.sess != nil && w <= 0x10FFFF {
+			tv.resetCursorBlink()
+			_ = tv.sess.Write([]byte(string(rune(w))))
+		}
+		return 0
+
+	case wmImeEndComposition:
+		if tv != nil {
+			tv.setPreedit("")
+		}
+		return 0
+
 	case wmSetFocus:
 		if tv != nil {
 			tv.mu.Lock()
@@ -205,6 +294,7 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 			tv.focused = false
 			tv.cursorBlinkVisible = true
 			tv.mu.Unlock()
+			tv.setPreedit("")
 			procInvalidateRect.Call(hwnd, 0, 0)
 		}
 		return 0
@@ -310,6 +400,7 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 			procKillTimer.Call(hwnd, 1)
 			tv.cleanupD2D()
 		}
+		procPostQuitMessage.Call(0)
 		return 0
 	}
 
@@ -363,16 +454,19 @@ func NewTerminalView(parentHwnd uintptr, onExit func(code uint32)) (*TerminalVie
 		lastBlinkToggle:    time.Now(),
 		blinkInterval:      blinkInterval,
 	}
+	tv.imeFont = logFontW{Height: -16, Weight: 400, CharSet: 1, PitchAndFamily: 0x31}
+	copy(tv.imeFont.FaceName[:], syscall.StringToUTF16("Consolas"))
 
 	name := utf16Ptr(d2dViewClassName)
 	title := utf16Ptr("Terminal View")
+	owner, _, _ := procGetAncestor.Call(parentHwnd, gaRoot)
 	hwnd, _, callErr := procCreateWindowExW.Call(
 		0,
 		uintptr(unsafe.Pointer(name)),
 		uintptr(unsafe.Pointer(title)),
-		wsChild|wsTabStop|wsClipSiblings,
+		wsPopup|wsClipSiblings,
 		0, 0, 100, 100,
-		parentHwnd,
+		owner, // owned top-level window: IME only engages for our own root
 		0, 0, 0,
 	)
 	if hwnd == 0 {
@@ -458,14 +552,14 @@ func (tv *TerminalView) CloseSession() {
 	}
 }
 
-func (tv *TerminalView) SetBounds(x, y, w, h int) {
+func (tv *TerminalView) SetScreenBounds(x, y, w, h int) {
 	procMoveWindow.Call(tv.hwnd, uintptr(x), uintptr(y), uintptr(w), uintptr(h), 1)
 }
 
 func (tv *TerminalView) Show(visible bool) {
-	cmd := 0
+	cmd := 0 // SW_HIDE
 	if visible {
-		cmd = 5 // SW_SHOW
+		cmd = swShowNoActivate
 	}
 	procShowWindow.Call(tv.hwnd, uintptr(cmd))
 }
@@ -477,6 +571,68 @@ func (tv *TerminalView) Focus() {
 	tv.lastBlinkToggle = time.Now()
 	tv.mu.Unlock()
 	procSetFocus.Call(tv.hwnd)
+}
+
+func (tv *TerminalView) handleComposition(l uintptr) {
+	imc, _, _ := procImmGetContext.Call(tv.hwnd)
+	if imc == 0 {
+		return
+	}
+	defer procImmReleaseContext.Call(tv.hwnd, imc)
+
+	if l&gcsResultStr != 0 {
+		if s := imeCompositionString(imc, gcsResultStr); s != "" {
+			tv.mu.Lock()
+			sess := tv.sess
+			tv.mu.Unlock()
+			tv.setPreedit("")
+			if sess != nil {
+				tv.resetCursorBlink()
+				_ = sess.Write([]byte(s))
+			}
+		}
+	}
+	if l&gcsCompStr != 0 {
+		tv.setPreedit(imeCompositionString(imc, gcsCompStr))
+		tv.positionComposition()
+	}
+}
+
+func imeCompositionString(imc uintptr, flag uintptr) string {
+	size, _, _ := procImmGetCompositionStringW.Call(imc, flag, 0, 0)
+	if int32(size) <= 0 {
+		return ""
+	}
+	buf := make([]uint16, size/2)
+	procImmGetCompositionStringW.Call(imc, flag, uintptr(unsafe.Pointer(&buf[0])), size)
+	return syscall.UTF16ToString(buf)
+}
+
+func (tv *TerminalView) setPreedit(s string) {
+	tv.mu.Lock()
+	changed := tv.preedit != s
+	tv.preedit = s
+	tv.mu.Unlock()
+	if changed {
+		procInvalidateRect.Call(tv.hwnd, 0, 0)
+	}
+}
+
+func (tv *TerminalView) positionComposition() {
+	imc, _, _ := procImmGetContext.Call(tv.hwnd)
+	if imc == 0 {
+		return
+	}
+	defer procImmReleaseContext.Call(tv.hwnd, imc)
+
+	tv.mu.Lock()
+	x := int32(tv.frameCursor.X) * int32(tv.cellWidth)
+	y := int32(tv.frameCursor.Y) * int32(tv.cellHeight)
+	tv.mu.Unlock()
+
+	cf := compositionForm{Style: cfsPoint, CurrentPos: point{X: x, Y: y}}
+	procImmSetCompositionWindow.Call(imc, uintptr(unsafe.Pointer(&cf)))
+	procImmSetCompositionFontW.Call(imc, uintptr(unsafe.Pointer(&tv.imeFont)))
 }
 
 func (tv *TerminalView) resetCursorBlink() {
@@ -604,6 +760,7 @@ func (tv *TerminalView) render() {
 	cur := tv.frameCursor
 	cursorVisible := tv.cursorBlinkVisible
 	focused := tv.focused
+	preedit := tv.preedit
 	tv.mu.Unlock()
 
 	tv.rt.BeginDraw()
@@ -676,8 +833,31 @@ func (tv *TerminalView) render() {
 			}
 		}
 
+		// IME composition string drawn at the cursor cell.
+		if preedit != "" && cur.Y < rr {
+			runes := []rune(preedit)
+			maxCols := int(cc) - int(cur.X)
+			if maxCols < 1 {
+				maxCols = 1
+			}
+			if len(runes) > maxCols {
+				runes = runes[:maxCols]
+			}
+			width := float32(len(runes)) * cw
+			left := float32(cur.X) * cw
+			top := float32(cur.Y) * ch
+			bg := d2d.RectF{Left: left, Top: top, Right: left + width, Bottom: top + ch}
+			d2d.SetBrushColor(tv.brush, d2d.Color{R: 0.13, G: 0.16, B: 0.22, A: 1})
+			tv.rt.FillRectangle(bg, tv.brush)
+			d2d.SetBrushColor(tv.brush, d2d.Color{R: 0.91, G: 0.91, B: 0.91, A: 1})
+			textRect := d2d.RectF{Left: left, Top: top + 1, Right: left + width, Bottom: top + ch}
+			tv.rt.DrawText(string(runes), tv.textFormat, textRect, tv.brush)
+			underline := d2d.RectF{Left: left, Top: top + ch - 2, Right: left + width, Bottom: top + ch - 1}
+			tv.rt.FillRectangle(underline, tv.brush)
+		}
+
 		// Cursor
-		if cur.Visible != 0 && cur.X < cc && cur.Y < rr {
+		if preedit == "" && cur.Visible != 0 && cur.X < cc && cur.Y < rr {
 			drawCursor := true
 			if cur.Blinking != 0 && focused {
 				drawCursor = cursorVisible

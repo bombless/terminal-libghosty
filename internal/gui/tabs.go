@@ -217,6 +217,9 @@ func (mw *MainWindow) startSession(kind int, title string, sessionArgs []string,
 		return
 	}
 	tab.serverCmd = cmd
+	// Let the host bring its terminal window to the foreground; the view is a
+	// top-level window so the IME only engages while it is the active window.
+	procAllowSetForegroundWindow.Call(uintptr(cmd.Process.Pid))
 	mw.activateTab(idx)
 	mw.setStatus(status)
 

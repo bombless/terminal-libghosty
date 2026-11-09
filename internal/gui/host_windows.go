@@ -72,9 +72,15 @@ func RunHost(parentText, target, identity string, port int, shell string) error 
 	if height < 1 {
 		height = 24 * 18
 	}
-	view.SetBounds(0, 0, width, height)
+	if r, ok := containerScreenRect(parent); ok {
+		view.SetScreenBounds(int(r.Left), int(r.Top), int(r.Right-r.Left), int(r.Bottom-r.Top))
+	} else {
+		view.SetScreenBounds(0, 0, width, height)
+	}
 	view.Show(true)
 	view.Focus()
+	owner, _, _ := procGetAncestor.Call(parent, gaRoot)
+	go ensureForeground(view.HWND(), owner)
 
 	cols, rows := uint16(width/9), uint16(height/18)
 	if cols < 1 {
@@ -106,20 +112,37 @@ func RunHost(parentText, target, identity string, port int, shell string) error 
 		view.AttachSession(session)
 	}
 
-	// Resize the child surface as the parent resizes its client area.
+	// Track the container as the GUI lays out tabs, collapses the list or
+	// moves the main window. The view is a top-level window (IME needs that),
+	// so it must follow the container rectangle explicitly.
 	go func() {
-		lastW, lastH := width, height
+		visible := false
+		var last rect
 		for {
 			time.Sleep(30 * time.Millisecond)
 			if alive, _, _ := hostIsWindow.Call(parent); alive == 0 {
 				os.Exit(0)
 			}
-			var current rect
-			procGetClientRect.Call(parent, uintptr(unsafe.Pointer(&current)))
-			w, h := int(current.Right-current.Left), int(current.Bottom-current.Top)
-			if w > 0 && h > 0 && (w != lastW || h != lastH) {
-				lastW, lastH = w, h
-				view.SetBounds(0, 0, w, h)
+			containerVisible, _, _ := procIsWindowVisible.Call(parent)
+			ownerIconic, _, _ := procIsIconic.Call(owner)
+			if containerVisible == 0 || ownerIconic != 0 {
+				if visible {
+					view.Show(false)
+					visible = false
+				}
+				continue
+			}
+			r, ok := containerScreenRect(parent)
+			if !ok {
+				continue
+			}
+			if !visible || r != last {
+				view.SetScreenBounds(int(r.Left), int(r.Top), int(r.Right-r.Left), int(r.Bottom-r.Top))
+				last = r
+				if !visible {
+					view.Show(true)
+					visible = true
+				}
 			}
 		}
 	}()
@@ -134,4 +157,34 @@ func RunHost(parentText, target, identity string, port int, shell string) error 
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&message)))
 	}
 	return nil
+}
+
+func containerScreenRect(container uintptr) (rect, bool) {
+	var client rect
+	procGetClientRect.Call(container, uintptr(unsafe.Pointer(&client)))
+	w, h := client.Right-client.Left, client.Bottom-client.Top
+	if w <= 0 || h <= 0 {
+		return rect{}, false
+	}
+	var origin point
+	procClientToScreen.Call(container, uintptr(unsafe.Pointer(&origin)))
+	return rect{Left: origin.X, Top: origin.Y, Right: origin.X + w, Bottom: origin.Y + h}, true
+}
+
+// The GUI grants foreground rights with AllowSetForegroundWindow; retry briefly
+// while the owner stays in front so a freshly opened tab is ready to type in.
+func ensureForeground(hwnd, owner uintptr) {
+	for i := 0; i < 10; i++ {
+		fg, _, _ := procGetForegroundWindow.Call()
+		if fg == hwnd {
+			return
+		}
+		if fg != owner {
+			return
+		}
+		if r, _, _ := procSetForegroundWindow.Call(hwnd); r != 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
