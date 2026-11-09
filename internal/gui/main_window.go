@@ -633,12 +633,14 @@ func (mw *MainWindow) toggleList() {
 	procShowWindow.Call(mw.hList, cmd)
 	mw.layout()
 	procInvalidateRect.Call(mw.hBtnToggleList, 0, 0)
-	if !mw.connected {
+	if mw.connected {
 		if mw.listCollapsed {
-			mw.setStatus("Connection list collapsed.")
-		} else {
-			mw.setStatus("Connection list expanded.")
+			mw.setStatus("")
 		}
+	} else if mw.listCollapsed {
+		mw.setStatus("Connection list collapsed.")
+	} else {
+		mw.setStatus("Connection list expanded.")
 	}
 }
 
@@ -688,7 +690,11 @@ func (mw *MainWindow) startConnect(target, identity string, port int) {
 	mw.connected = true
 	mw.setProfileFormVisible(false)
 	procShowWindow.Call(mw.hBtnDisconnect, 5) // SW_SHOW
-	mw.setStatus(fmt.Sprintf("Terminal server started for %s", target))
+	if mw.listCollapsed {
+		mw.setStatus("")
+	} else {
+		mw.setStatus(fmt.Sprintf("Terminal server started for %s", target))
+	}
 }
 
 func (mw *MainWindow) stopConnect() {
