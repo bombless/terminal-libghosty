@@ -33,6 +33,14 @@ static int32_t tl_terminal_resize(uintptr_t terminal, uint16_t cols, uint16_t ro
 	return (int32_t)ghostty_terminal_resize((GhosttyTerminal)terminal, cols, rows, cell_width, cell_height);
 }
 
+static int32_t tl_terminal_grid_ref(uintptr_t terminal, int32_t tag, uint16_t x, uint32_t y, uintptr_t out) {
+	GhosttyPoint point = {0};
+	point.tag = (GhosttyPointTag)tag;
+	point.value.coordinate.x = x;
+	point.value.coordinate.y = y;
+	return (int32_t)ghostty_terminal_grid_ref((GhosttyTerminal)terminal, point, (GhosttyGridRef*)out);
+}
+
 static int32_t tl_render_state_new(uintptr_t out) {
 	GhosttyRenderState state = NULL;
 	GhosttyResult result = ghostty_render_state_new(NULL, &state);
@@ -115,6 +123,9 @@ func loadGhosttyAPI() (*ghosttyAPI, error) {
 			}),
 			terminalResize: staticGhosttyProc(func(args ...uintptr) uintptr {
 				return uintptr(C.tl_terminal_resize(C.uintptr_t(args[0]), C.uint16_t(args[1]), C.uint16_t(args[2]), C.uint32_t(args[3]), C.uint32_t(args[4])))
+			}),
+			terminalGridRef: staticGhosttyProc(func(args ...uintptr) uintptr {
+				return uintptr(C.tl_terminal_grid_ref(C.uintptr_t(args[0]), C.int32_t(args[1]), C.uint16_t(args[2]), C.uint32_t(args[3]), C.uintptr_t(args[4])))
 			}),
 			renderNew: staticGhosttyProc(func(args ...uintptr) uintptr {
 				return uintptr(C.tl_render_state_new(C.uintptr_t(args[1])))

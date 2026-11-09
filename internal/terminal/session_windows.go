@@ -160,6 +160,39 @@ func (s *Session) PollExit() (bool, uint32, error) {
 	return p.PollExit()
 }
 
+// Select installs a linear selection between two active-area cells.
+func (s *Session) Select(startCol, startRow, endCol, endRow uint16) error {
+	if s == nil {
+		return fmt.Errorf("terminal session is closed")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("terminal session is closed")
+	}
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.setSelection(startCol, startRow, endCol, endRow)
+}
+
+func (s *Session) ClearSelection() error {
+	if s == nil {
+		return fmt.Errorf("terminal session is closed")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("terminal session is closed")
+	}
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.clearSelection()
+}
+
 // Snapshot returns a caller-owned copy of Ghostty's rendered cell grid.
 func (s *Session) Snapshot() (uint16, uint16, []Cell, []byte, Cursor, error) {
 	if s == nil {

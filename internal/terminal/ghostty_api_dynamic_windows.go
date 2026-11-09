@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
+	"unsafe"
 )
 
 func loadGhosttyAPI() (*ghosttyAPI, error) {
@@ -51,6 +53,23 @@ func loadGhosttyAPI() (*ghosttyAPI, error) {
 			rowCellsFree:    find("ghostty_render_state_row_cells_free"),
 			rowCellsNext:    find("ghostty_render_state_row_cells_next"),
 			rowCellsGet:     find("ghostty_render_state_row_cells_get"),
+		}
+		if gridRef := find("ghostty_terminal_grid_ref"); gridRef != nil {
+			// The C API takes GhosttyPoint by value. The Win64 ABI passes
+			// structs that are not 1/2/4/8 bytes as a pointer, so the
+			// address can be passed in the argument slot directly.
+			a.terminalGridRef = &ghosttyProc{call: func(args ...uintptr) (uintptr, uintptr, error) {
+				if unsafe.Sizeof(uintptr(0)) != 8 {
+					return ^uintptr(0), 0, fmt.Errorf("ghostty_terminal_grid_ref requires the Win64 ABI")
+				}
+				point := ghosttyPoint{
+					Tag:   int32(args[1]),
+					Value: [2]uint64{uint64(uint16(args[2])) | uint64(uint32(args[3]))<<32},
+				}
+				r, _, err := gridRef.Call(args[0], uintptr(unsafe.Pointer(&point)), args[4])
+				runtime.KeepAlive(&point)
+				return r, 0, err
+			}}
 		}
 		if ghosttyLoadErr == nil {
 			ghostty = a

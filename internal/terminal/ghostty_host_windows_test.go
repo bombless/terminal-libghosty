@@ -82,3 +82,42 @@ func TestGhosttyHostMatchesNativeBridgeBehavior(t *testing.T) {
 		t.Fatalf("empty Ghostty feed should be accepted: %v", err)
 	}
 }
+
+func TestGhosttyHostSelectionMarksCells(t *testing.T) {
+	host, err := newGhosttyHost(func([]byte) {})
+	if err != nil {
+		t.Fatalf("create Ghostty host: %v", err)
+	}
+	defer host.destroy()
+
+	if err := host.feedOutput([]byte("hello world")); err != nil {
+		t.Fatalf("feed Ghostty output: %v", err)
+	}
+	if err := host.setSelection(0, 0, 4, 0); err != nil {
+		t.Fatalf("install selection: %v", err)
+	}
+
+	assertSelected := func(want ...bool) {
+		t.Helper()
+		_, _, cells, _, _, err := host.snapshot()
+		if err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		for i, selected := range want {
+			if got := cells[i].Selected != 0; got != selected {
+				t.Fatalf("cell %d selected = %v, want %v", i, got, selected)
+			}
+		}
+	}
+
+	assertSelected(true, true, true, true, true, false)
+
+	if err := host.clearSelection(); err != nil {
+		t.Fatalf("clear selection: %v", err)
+	}
+	assertSelected(false, false, false, false, false, false)
+
+	if err := host.setSelection(0, 0, 0, 99); err == nil {
+		t.Fatal("out-of-bounds selection should be rejected")
+	}
+}

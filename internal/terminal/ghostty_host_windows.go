@@ -28,11 +28,34 @@ const (
 	ghosttyCellDataUTF8        = 9
 	ghosttyTerminalUser        = 1
 	ghosttyTerminalWrite       = 2
+	ghosttyTerminalSelection   = 22
 	ghosttyTerminalCursorBlink = 24
+	ghosttyPointTagActive      = 0
 )
 
 type ghosttyRGB struct{ R, G, B uint8 }
 type ghosttyBuffer struct{ Ptr, Cap, Len uintptr }
+type ghosttyPoint struct {
+	Tag   int32
+	_     int32
+	Value [2]uint64
+}
+type ghosttyGridRef struct {
+	Node uintptr
+	X, Y uint16
+}
+type ghosttySelection struct {
+	Start, End ghosttyGridRef
+	Rectangle  uint8
+	_          [7]byte
+}
+
+var (
+	_ [24 - unsafe.Sizeof(ghosttyPoint{})]byte
+	_ [16 - unsafe.Sizeof(ghosttyGridRef{})]byte
+	_ [40 - unsafe.Sizeof(ghosttySelection{})]byte
+)
+
 type ghosttyStyleColor struct {
 	Tag   uint8
 	Value [3]byte
@@ -66,6 +89,7 @@ func (p *ghosttyProc) Call(args ...uintptr) (uintptr, uintptr, error) {
 
 type ghosttyAPI struct {
 	terminalNew, terminalFree, terminalSet, terminalWrite, terminalResize *ghosttyProc
+	terminalGridRef                                                       *ghosttyProc
 	renderNew, renderFree, renderUpdate, renderGet, renderClean           *ghosttyProc
 	rowIteratorNew, rowIteratorFree, rowIteratorNext, rowGet              *ghosttyProc
 	rowCellsNew, rowCellsFree, rowCellsNext, rowCellsGet                  *ghosttyProc
@@ -164,6 +188,44 @@ func (h *ghosttyHost) resize(cols, rows uint16, cellWidth, cellHeight uint32) er
 	r, _, _ := h.api.terminalResize.Call(h.terminal, uintptr(cols), uintptr(rows), uintptr(cellWidth), uintptr(cellHeight))
 	if int32(r) != ghosttySuccess {
 		return fmt.Errorf("ghostty_terminal_resize failed: %d", int32(r))
+	}
+	return nil
+}
+
+// setSelection installs a linear selection between two active-area cells.
+func (h *ghosttyHost) setSelection(startX, startY, endX, endY uint16) error {
+	if h == nil || h.terminal == 0 || h.api == nil || h.api.terminalGridRef == nil {
+		return fmt.Errorf("Ghostty host is closed")
+	}
+	var sel ghosttySelection
+	resolve := func(x, y uint16, out *ghosttyGridRef) error {
+		r, _, _ := h.api.terminalGridRef.Call(h.terminal, ghosttyPointTagActive, uintptr(x), uintptr(y), uintptr(unsafe.Pointer(out)))
+		if int32(r) != ghosttySuccess {
+			return fmt.Errorf("Ghostty grid reference query failed: %d", int32(r))
+		}
+		return nil
+	}
+	if err := resolve(startX, startY, &sel.Start); err != nil {
+		return err
+	}
+	if err := resolve(endX, endY, &sel.End); err != nil {
+		return err
+	}
+	r, _, _ := h.api.terminalSet.Call(h.terminal, ghosttyTerminalSelection, uintptr(unsafe.Pointer(&sel)))
+	runtime.KeepAlive(&sel)
+	if int32(r) != ghosttySuccess {
+		return fmt.Errorf("Ghostty selection install failed: %d", int32(r))
+	}
+	return nil
+}
+
+func (h *ghosttyHost) clearSelection() error {
+	if h == nil || h.terminal == 0 {
+		return fmt.Errorf("Ghostty host is closed")
+	}
+	r, _, _ := h.api.terminalSet.Call(h.terminal, ghosttyTerminalSelection, 0)
+	if int32(r) != ghosttySuccess {
+		return fmt.Errorf("Ghostty selection clear failed: %d", int32(r))
 	}
 	return nil
 }

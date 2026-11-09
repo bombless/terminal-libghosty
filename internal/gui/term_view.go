@@ -58,6 +58,8 @@ var (
 	procGetCaretBlinkTime        = u32.NewProc("GetCaretBlinkTime")
 	procClientToScreen           = u32.NewProc("ClientToScreen")
 	procGetAncestor              = u32.NewProc("GetAncestor")
+	procSetCapture               = u32.NewProc("SetCapture")
+	procReleaseCapture           = u32.NewProc("ReleaseCapture")
 	procIsWindowVisible          = u32.NewProc("IsWindowVisible")
 	procIsIconic                 = u32.NewProc("IsIconic")
 	procSetForegroundWindow      = u32.NewProc("SetForegroundWindow")
@@ -90,6 +92,9 @@ const (
 	wmImeChar             = 0x0286
 	wmTimer               = 0x113
 	wmLButtonDown         = 0x201
+	wmLButtonUp           = 0x202
+	wmMouseMove           = 0x200
+	wmCaptureChanged      = 0x215
 	wmCommand             = 0x0111
 	wmCtlColorStatic      = 0x0138
 	wmCtlColorEdit        = 0x0133
@@ -268,6 +273,10 @@ type TerminalView struct {
 	preedit string
 	imeFont logFontW
 
+	selecting              bool
+	selAnchorX, selAnchorY uint16
+	selLastX, selLastY     uint16
+
 	processExited bool
 	onExit        func(code uint32)
 	mu            sync.Mutex
@@ -350,6 +359,29 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 
 	case wmLButtonDown:
 		procSetFocus.Call(hwnd)
+		procSetCapture.Call(hwnd)
+		if tv != nil {
+			tv.beginSelection(l)
+		}
+		return 0
+
+	case wmMouseMove:
+		if tv != nil {
+			tv.updateSelection(l)
+		}
+		return 0
+
+	case wmLButtonUp:
+		if tv != nil {
+			tv.endSelection()
+		}
+		procReleaseCapture.Call()
+		return 0
+
+	case wmCaptureChanged:
+		if tv != nil {
+			tv.endSelection()
+		}
 		return 0
 
 	case wmEraseBkgnd:
@@ -392,15 +424,10 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 	case wmKeyDown:
 		if tv != nil && tv.sess != nil {
 			seq := ""
+			// Enter, Backspace, Tab and Esc already arrive as wmChar after
+			// TranslateMessage; mapping them here too would double every
+			// keystroke (e.g. Tab completing two path levels).
 			switch w {
-			case 0x0D:
-				seq = "\r"
-			case 0x08:
-				seq = "\x7f"
-			case 0x09:
-				seq = "\t"
-			case 0x1B:
-				seq = "\x1b"
 			case 0x25: // Left
 				seq = "\x1b[D"
 			case 0x26: // Up
@@ -628,6 +655,73 @@ func (tv *TerminalView) Focus() {
 	tv.lastBlinkToggle = time.Now()
 	tv.mu.Unlock()
 	procSetFocus.Call(tv.hwnd)
+}
+
+// cellFromLParam maps client-area pixels from a mouse message to a cell,
+// clamping drags that leave the terminal window to the nearest edge.
+func (tv *TerminalView) cellFromLParam(l uintptr) (uint16, uint16) {
+	px := int(int16(uint16(l)))
+	py := int(int16(uint16(l >> 16)))
+	x, y := 0, 0
+	if tv.cellWidth > 0 && tv.cellHeight > 0 {
+		x = int(float32(px) / tv.cellWidth)
+		y = int(float32(py) / tv.cellHeight)
+	}
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	maxX := int(tv.cols) - 1
+	if maxX < 0 {
+		maxX = 0
+	}
+	maxY := int(tv.rows) - 1
+	if maxY < 0 {
+		maxY = 0
+	}
+	if x > maxX {
+		x = maxX
+	}
+	if y > maxY {
+		y = maxY
+	}
+	return uint16(x), uint16(y)
+}
+
+func (tv *TerminalView) beginSelection(l uintptr) {
+	x, y := tv.cellFromLParam(l)
+	tv.selecting = true
+	tv.selAnchorX, tv.selAnchorY = x, y
+	tv.selLastX, tv.selLastY = x, y
+	tv.mu.Lock()
+	sess := tv.sess
+	tv.mu.Unlock()
+	if sess != nil {
+		_ = sess.ClearSelection()
+	}
+}
+
+func (tv *TerminalView) updateSelection(l uintptr) {
+	if !tv.selecting {
+		return
+	}
+	x, y := tv.cellFromLParam(l)
+	if x == tv.selLastX && y == tv.selLastY {
+		return
+	}
+	tv.selLastX, tv.selLastY = x, y
+	tv.mu.Lock()
+	sess := tv.sess
+	tv.mu.Unlock()
+	if sess != nil {
+		_ = sess.Select(tv.selAnchorX, tv.selAnchorY, x, y)
+	}
+}
+
+func (tv *TerminalView) endSelection() {
+	tv.selecting = false
 }
 
 func (tv *TerminalView) handleComposition(l uintptr) {
