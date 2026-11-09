@@ -9,9 +9,9 @@
 
 ## Ghostty VT integration
 
-- The project uses the public `libghostty-vt` C ABI from the official `ghostty-vt.dll`; the upstream internal `ghostty.h` embedder API is not used.
+- The project uses the public `libghostty-vt` C ABI. Production builds statically link `ghostty-vt-static.lib`; the upstream internal `ghostty.h` embedder API is not used.
 - The original `native/ghostty_host.c` is the compatibility reference for terminal creation, VT feed, WRITE_PTY callback, render-state iteration, UTF-8 graphemes, resolved colors, style flags, selection, cursor and resize.
-- `internal/terminal/ghostty_host_windows.go` now implements that host behavior in Go using Windows DLL calls. It does not use cgo and does not decode packed Ghostty cell bits.
+- `internal/terminal/ghostty_host_windows.go` implements that host behavior in Go. With cgo enabled it calls the statically linked library through a small C shim; with cgo disabled it falls back to Windows DLL calls for development and ABI testing. It does not decode packed Ghostty cell bits.
 - The Ghostty DLL used by the working native C reference and its passing CTest suite is the compatibility target. The exact upstream Git pin is not a migration blocker.
 
 ## ConPTY and Go Session
@@ -42,15 +42,23 @@ Equivalent Go tests cover:
 
 ## Verified Windows build
 
-- `CGO_ENABLED=0 go test ./...`: passed.
-- `CGO_ENABLED=0 go build ./...`: passed.
+- `ghostty-vt-static.lib` built with Zig 0.17.0
+  (`zig build -Demit-lib-vt -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast`)
+  and staged to `build/native-static`.
+- `CGO_ENABLED=1 CC="zig cc -target x86_64-windows-gnu" go build ./...`: passed.
+- `CGO_ENABLED=1` `go test ./...`: passed without setting `GHOSTTY_VT_DLL`,
+  exercising the statically linked terminal path end to end.
+- `CGO_ENABLED=0` with `GHOSTTY_VT_DLL`: build and the same tests still pass,
+  confirming the dynamic development/ABI fallback.
+- `build.ps1` produced `dist/terminal-libghosty.exe` and removed the old DLL
+  from `dist/`. The exe imports only `ntdll.dll`, `KERNEL32.dll` and the
+  Windows UCRT api-set DLLs; `ghostty-vt.dll` is not imported.
+- The GUI executable launches and remains running in a smoke test.
 - `go vet -unsafeptr=false ./...`: passed. Default `go vet ./...` still
   reports unsafe.Pointer diagnostics in existing Windows GUI/D2D FFI code.
 - The original native CTest baseline: 4/4 passed
   (`libghostty_vt_smoke`, `ghostty_host_bridge`, `windows_conpty_smoke`,
   `ssh_conpty_ghostty_e2e`).
-- Both Windows GUI executables build with `-H=windowsgui` and cgo disabled.
-  The official `ghostty-vt.dll` was copied beside them in `dist/`.
 
 ## Remaining work
 

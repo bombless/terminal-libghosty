@@ -44,44 +44,53 @@ jobs:
             ghostty/zig-pkg
           key: zig-0.17.0-${{ hashFiles('ghostty/build.zig.zon') }}
 
-      - name: Build ghostty-vt.dll
+      - name: Build libghostty-vt
         working-directory: ghostty
         run: zig build -Demit-lib-vt -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast
 
-      - name: Build terminal-go.exe
+      - name: Stage static library
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/native-static/include | Out-Null
+          Copy-Item ghostty/zig-out/lib/ghostty-vt-static.lib build/native-static/libghostty-vt-static.a -Force
+          Copy-Item ghostty/include/ghostty build/native-static/include/ -Recurse -Force
+
+      - name: Build terminal-libghosty.exe
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          go build -trimpath -ldflags="-s -w -H=windowsgui" -o dist/terminal-go.exe ./cmd/terminal-libghosty
-          Copy-Item ghostty/zig-out/bin/ghostty-vt.dll dist/ghostty-vt.dll
+          $env:CGO_ENABLED = "1"
+          $env:CC = "zig cc -target x86_64-windows-gnu"
+          go build -trimpath -ldflags="-s -w -H=windowsgui" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
+          if ($LASTEXITCODE -ne 0) { throw "go build failed" }
           Copy-Item ghostty/LICENSE dist/LICENSE-ghostty
 
       - name: Test
         env:
+          CGO_ENABLED: "1"
+          CC: zig cc -target x86_64-windows-gnu
           GHOSTTY_VT_DLL: ${{ github.workspace }}/ghostty/zig-out/bin/ghostty-vt.dll
         run: go test ./internal/terminal ./internal/ssh -count=1
 
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path dist/terminal-go.exe, dist/ghostty-vt.dll, dist/LICENSE-ghostty -DestinationPath terminal-go-windows-x64.zip
+        run: Compress-Archive -Path dist/terminal-libghosty.exe, dist/LICENSE-ghostty -DestinationPath terminal-libghosty-windows-x64.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: terminal-go-windows-x64
+          name: terminal-libghosty-windows-x64
           path: |
-            dist/terminal-go.exe
-            dist/ghostty-vt.dll
+            dist/terminal-libghosty.exe
             dist/LICENSE-ghostty
-            terminal-go-windows-x64.zip
+            terminal-libghosty-windows-x64.zip
 
       - name: Publish release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            dist/terminal-go.exe
-            dist/ghostty-vt.dll
+            dist/terminal-libghosty.exe
             dist/LICENSE-ghostty
-            terminal-go-windows-x64.zip
+            terminal-libghosty-windows-x64.zip
           generate_release_notes: true

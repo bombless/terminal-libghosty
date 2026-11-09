@@ -4,8 +4,6 @@ package terminal
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -58,12 +56,19 @@ type ghosttyColors struct {
 	Palette                        [256]ghosttyRGB
 }
 
+type ghosttyProc struct {
+	call func(args ...uintptr) (uintptr, uintptr, error)
+}
+
+func (p *ghosttyProc) Call(args ...uintptr) (uintptr, uintptr, error) {
+	return p.call(args...)
+}
+
 type ghosttyAPI struct {
-	dll                                                                   *syscall.DLL
-	terminalNew, terminalFree, terminalSet, terminalWrite, terminalResize *syscall.Proc
-	renderNew, renderFree, renderUpdate, renderGet, renderClean           *syscall.Proc
-	rowIteratorNew, rowIteratorFree, rowIteratorNext, rowGet              *syscall.Proc
-	rowCellsNew, rowCellsFree, rowCellsNext, rowCellsGet                  *syscall.Proc
+	terminalNew, terminalFree, terminalSet, terminalWrite, terminalResize *ghosttyProc
+	renderNew, renderFree, renderUpdate, renderGet, renderClean           *ghosttyProc
+	rowIteratorNew, rowIteratorFree, rowIteratorNext, rowGet              *ghosttyProc
+	rowCellsNew, rowCellsFree, rowCellsNext, rowCellsGet                  *ghosttyProc
 }
 
 var (
@@ -89,81 +94,7 @@ func ghosttyWritePTYCallback(_ uintptr, userdata uintptr, data uintptr, length u
 	return 0
 }
 
-func loadGhosttyAPI() (*ghosttyAPI, error) {
-	ghosttyLoadOnce.Do(func() {
-		path, err := findGhosttyDLL()
-		if err != nil {
-			ghosttyLoadErr = err
-			return
-		}
-		dll, err := syscall.LoadDLL(path)
-		if err != nil {
-			ghosttyLoadErr = fmt.Errorf("load Ghostty VT DLL %q: %w", path, err)
-			return
-		}
-		a := &ghosttyAPI{dll: dll}
-		find := func(name string) *syscall.Proc {
-			p, e := dll.FindProc(name)
-			if e != nil && ghosttyLoadErr == nil {
-				ghosttyLoadErr = fmt.Errorf("find Ghostty export %s: %w", name, e)
-			}
-			return p
-		}
-		a.terminalNew = find("ghostty_terminal_new")
-		a.terminalFree = find("ghostty_terminal_free")
-		a.terminalSet = find("ghostty_terminal_set")
-		a.terminalWrite = find("ghostty_terminal_vt_write")
-		a.terminalResize = find("ghostty_terminal_resize")
-		a.renderNew = find("ghostty_render_state_new")
-		a.renderFree = find("ghostty_render_state_free")
-		a.renderUpdate = find("ghostty_render_state_update")
-		a.renderGet = find("ghostty_render_state_get")
-		a.renderClean = find("ghostty_render_state_clean")
-		a.rowIteratorNew = find("ghostty_render_state_row_iterator_new")
-		a.rowIteratorFree = find("ghostty_render_state_row_iterator_free")
-		a.rowIteratorNext = find("ghostty_render_state_row_iterator_next")
-		a.rowGet = find("ghostty_render_state_row_get")
-		a.rowCellsNew = find("ghostty_render_state_row_cells_new")
-		a.rowCellsFree = find("ghostty_render_state_row_cells_free")
-		a.rowCellsNext = find("ghostty_render_state_row_cells_next")
-		a.rowCellsGet = find("ghostty_render_state_row_cells_get")
-		if ghosttyLoadErr == nil {
-			ghostty = a
-		} else {
-			dll.Release()
-		}
-	})
-	return ghostty, ghosttyLoadErr
-}
-
-func findGhosttyDLL() (string, error) {
-	if p := os.Getenv("GHOSTTY_VT_DLL"); p != "" {
-		return p, nil
-	}
-	if p := os.Getenv("TERMINAL_LIBGHOSTY_NATIVE_DIR"); p != "" {
-		return filepath.Join(p, "ghostty-vt.dll"), nil
-	}
-	candidates := []string{"build/native-local/ghostty-vt.dll", "../build/native-local/ghostty-vt.dll", "../../build/native-local/ghostty-vt.dll"}
-	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(exeDir, "ghostty-vt.dll"),
-			filepath.Join(exeDir, "..", "build", "native-local", "ghostty-vt.dll"),
-			filepath.Join(exeDir, "native-local", "ghostty-vt.dll"),
-		)
-	}
-	for _, candidate := range candidates {
-		p, err := filepath.Abs(candidate)
-		if err == nil {
-			if _, statErr := os.Stat(p); statErr == nil {
-				return p, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("ghostty-vt.dll not found; set GHOSTTY_VT_DLL or TERMINAL_LIBGHOSTY_NATIVE_DIR")
-}
-
-func procBool(p *syscall.Proc, args ...uintptr) bool {
+func procBool(p *ghosttyProc, args ...uintptr) bool {
 	r, _, _ := p.Call(args...)
 	return r != 0
 }
