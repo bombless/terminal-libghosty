@@ -61,8 +61,12 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $env:CGO_ENABLED = "1"
           $env:CC = "zig cc -target x86_64-windows-gnu"
-          go build -trimpath -ldflags="-s -w -H=windowsgui" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
+          go build -trimpath -ldflags="-s -w -H=windowsgui -extldflags=-Wl,--subsystem,windows" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
           if ($LASTEXITCODE -ne 0) { throw "go build failed" }
+          $bytes = [IO.File]::ReadAllBytes("dist/terminal-libghosty.exe")
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5c)
+          if ($subsystem -ne 2) { throw "terminal-libghosty.exe is not a GUI subsystem binary (subsystem=$subsystem)" }
           Copy-Item ghostty/LICENSE dist/LICENSE-ghostty
 
       - name: Test

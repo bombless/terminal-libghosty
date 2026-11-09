@@ -27,6 +27,6 @@ test: static
 
 build: static
 	cmake -E make_directory dist
-	$(CGO_ENV) go build -ldflags="-H=windowsgui" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
+	$(CGO_ENV) go build -ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
 	cmake -E copy_if_different ghostty/LICENSE dist/LICENSE-ghostty
 	$(if $(filter Windows_NT,$(OS)),powershell -NoProfile -Command "Remove-Item dist/ghostty-vt.dll -ErrorAction SilentlyContinue",rm -f dist/ghostty-vt.dll)

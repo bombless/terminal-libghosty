@@ -21,7 +21,11 @@ if (-not $env:CC) {
     $zigCC = $zig -replace '\\', '/'
     $env:CC = "`"$zigCC`" cc -target x86_64-windows-gnu"
 }
-go build -ldflags="-H=windowsgui" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
+go build -ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
 if ($LASTEXITCODE -ne 0) { throw "go build failed with exit code $LASTEXITCODE" }
+$bytes = [IO.File]::ReadAllBytes("dist/terminal-libghosty.exe")
+$pe = [BitConverter]::ToInt32($bytes, 0x3c)
+$subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5c)
+if ($subsystem -ne 2) { throw "terminal-libghosty.exe is not a GUI subsystem binary (subsystem=$subsystem)" }
 Copy-Item ghostty/LICENSE dist/LICENSE-ghostty -Force
 Remove-Item dist/ghostty-vt.dll -ErrorAction SilentlyContinue
