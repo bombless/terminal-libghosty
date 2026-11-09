@@ -32,9 +32,9 @@ const (
 	idBtnDelete      = 1007
 	idBtnConnect     = 1008
 	idBtnDisconnect  = 1009
-	idStatusLabel    = 1010
 	idHeaderLabel    = 1011
 	idSubheaderLabel = 1012
+	idBtnToggleList  = 1013
 
 	lbsNotify     = 0x0001
 	wsVScroll     = 0x00200000
@@ -52,6 +52,7 @@ const (
 	dtSingleline = 0x0020
 
 	idcArrow = 32512
+	vkF9     = 0x78
 )
 
 var (
@@ -72,10 +73,12 @@ type MainWindow struct {
 	btnFont    uintptr
 
 	// Child controls
-	hHeader     uintptr
-	hSub        uintptr
-	hList       uintptr
-	hRightPanel uintptr
+	hHeader        uintptr
+	hSub           uintptr
+	hList          uintptr
+	hRightPanel    uintptr
+	hBtnToggleList uintptr
+	listCollapsed  bool
 
 	// Profile fields
 	hLblName     uintptr
@@ -96,7 +99,6 @@ type MainWindow struct {
 	connected      bool
 	serverCmd      *exec.Cmd
 
-	hStatus  uintptr
 	profiles []Profile
 }
 
@@ -124,10 +126,6 @@ func mainWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		ctl := l
 		procSetBkMode.Call(hdc, 1) // TRANSPARENT
 		if mw != nil {
-			if ctl == mw.hStatus {
-				procSetTextColor.Call(hdc, 0x0090EE90) // LightGreen
-				return mw.bgBrush
-			}
 			if ctl == mw.hHeader {
 				procSetTextColor.Call(hdc, 0x00FFFFFF)
 				return mw.bgBrush
@@ -163,6 +161,7 @@ func mainWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		dis := (*drawItemStruct)(unsafe.Pointer(l))
 		if dis.CtlType == 4 && mw != nil { // ODT_BUTTON
 			btnText := ""
+			fillBrush := mw.btnBrush
 			switch dis.CtlID {
 			case idBtnSave:
 				btnText = "SAVE CONNECTION"
@@ -172,10 +171,17 @@ func mainWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 				btnText = "DELETE"
 			case idBtnDisconnect:
 				btnText = "← BACK / DISCONNECT"
+			case idBtnToggleList:
+				if mw.listCollapsed {
+					btnText = "SHOW LIST  ▶"
+				} else {
+					btnText = "◀  HIDE LIST"
+				}
+				fillBrush = mw.panelBrush
 			}
 
-			// Fill button background: #3070D2
-			procFillRect.Call(dis.Hdc, uintptr(unsafe.Pointer(&dis.RcItem)), mw.btnBrush)
+			// Fill button background
+			procFillRect.Call(dis.Hdc, uintptr(unsafe.Pointer(&dis.RcItem)), fillBrush)
 			procSetBkMode.Call(dis.Hdc, 1) // TRANSPARENT
 			procSetTextColor.Call(dis.Hdc, 0x00FFFFFF)
 			if mw.btnFont != 0 {
@@ -360,6 +366,13 @@ func (mw *MainWindow) createControls() {
 	)
 	procSendMessageW.Call(mw.hSub, 0x0030, mw.subFont, 1)
 
+	// List collapse toggle (positioned by layout)
+	mw.hBtnToggleList, _, _ = procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(utf16Ptr("BUTTON"))), uintptr(unsafe.Pointer(utf16Ptr("HIDE LIST"))),
+		wsChild|wsVisible|wsTabStop|bsOwnerdraw,
+		0, 0, 160, 34, mw.hwnd, idBtnToggleList, 0, 0,
+	)
+
 	// Profiles ListBox
 	mw.hList, _, _ = procCreateWindowExW.Call(
 		0, uintptr(unsafe.Pointer(utf16Ptr("LISTBOX"))), 0,
@@ -413,17 +426,13 @@ func (mw *MainWindow) createControls() {
 	mw.hBtnConnect = createBtn("CONNECT  →", 232, 340, 190, 42, idBtnConnect)
 	mw.hBtnDelete = createBtn("DELETE", 24, 395, 130, 36, idBtnDelete)
 
-	// Disconnect button (hidden by default)
-	mw.hBtnDisconnect = createBtn("← BACK / DISCONNECT", 10, 8, 210, 36, idBtnDisconnect)
-	procShowWindow.Call(mw.hBtnDisconnect, 0) // SW_HIDE
-
-	// Status label at bottom
-	mw.hStatus, _, _ = procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(utf16Ptr("STATIC"))),
-		uintptr(unsafe.Pointer(utf16Ptr("Ready · Direct2D Terminal · SSH host-key verification enabled"))),
-		wsChild|wsVisible, 28, 570, 920, 35, mw.hwnd, idStatusLabel, 0, 0,
+	// Disconnect button in the top bar, left of the list toggle (hidden by default)
+	mw.hBtnDisconnect, _, _ = procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(utf16Ptr("BUTTON"))), uintptr(unsafe.Pointer(utf16Ptr("← BACK / DISCONNECT"))),
+		wsChild|wsTabStop|bsOwnerdraw,
+		0, 0, 210, 34, mw.hwnd, idBtnDisconnect, 0, 0,
 	)
-	procSendMessageW.Call(mw.hStatus, 0x0030, mw.subFont, 1)
+	procShowWindow.Call(mw.hBtnDisconnect, 0) // SW_HIDE
 }
 
 func (mw *MainWindow) layout() {
@@ -439,29 +448,57 @@ func (mw *MainWindow) layout() {
 	if width < 900 {
 		listW = (width - 60) / 2
 	}
-	contentH := height - 112 - 50 // Leave space for status bar
+	contentH := height - 112
 	if contentH < 300 {
 		contentH = 300
 	}
 
-	// Left ListBox
-	procMoveWindow.Call(mw.hList, 28, 112, uintptr(listW), uintptr(contentH), 1)
+	// Collapse toggle at top right, opposite the header text
+	toggleW, toggleH := 160, 34
+	toggleX := width - 28 - toggleW
+	if toggleX < 28 {
+		toggleX = 28
+	}
+	procMoveWindow.Call(mw.hBtnToggleList, uintptr(toggleX), 24, uintptr(toggleW), uintptr(toggleH), 1)
 
-	// Right Panel
-	rightX := 28 + listW + 30
-	rightW := width - rightX - 28
+	// Disconnect button sits to the left of the toggle
+	discW := 210
+	discX := toggleX - 12 - discW
+	if discX < 28 {
+		discX = 28
+	}
+	procMoveWindow.Call(mw.hBtnDisconnect, uintptr(discX), 24, uintptr(discW), 34, 1)
+
+	headerRight := toggleX
+	if mw.connected {
+		headerRight = discX
+	}
+	headerW := headerRight - 28 - 20
+	if headerW < 200 {
+		headerW = 200
+	}
+	procMoveWindow.Call(mw.hHeader, 28, 20, uintptr(headerW), 40, 1)
+	procMoveWindow.Call(mw.hSub, 31, 65, uintptr(headerW), 25, 1)
+
+	rightX := 28
+	rightW := width - 56
+	if !mw.listCollapsed {
+		// Left ListBox
+		procMoveWindow.Call(mw.hList, 28, 112, uintptr(listW), uintptr(contentH), 1)
+		rightX = 28 + listW + 30
+		rightW = width - rightX - 28
+	}
 	if rightW < 350 {
 		rightW = 350
 	}
+
+	// Right Panel
 	procMoveWindow.Call(mw.hRightPanel, uintptr(rightX), 112, uintptr(rightW), uintptr(contentH), 1)
 
 	// Terminal View inside right panel if created
 	if mw.termView != nil {
 		mw.termView.SetBounds(10, 52, rightW-20, contentH-62)
 	}
-
-	// Status bar
-	procMoveWindow.Call(mw.hStatus, 28, uintptr(height-40), uintptr(width-56), 30, 1)
 }
 
 func (mw *MainWindow) loadAndRefreshProfiles() {
@@ -493,7 +530,7 @@ func (mw *MainWindow) selectProfile(idx int) {
 }
 
 func (mw *MainWindow) setStatus(text string) {
-	setWindowText(mw.hStatus, text)
+	setWindowText(mw.hSub, text)
 }
 
 func (mw *MainWindow) handleCommand(id, code uint16) {
@@ -581,6 +618,27 @@ func (mw *MainWindow) handleCommand(id, code uint16) {
 
 	case idBtnDisconnect:
 		mw.stopConnect()
+
+	case idBtnToggleList:
+		mw.toggleList()
+	}
+}
+
+func (mw *MainWindow) toggleList() {
+	mw.listCollapsed = !mw.listCollapsed
+	cmd := uintptr(5) // SW_SHOW
+	if mw.listCollapsed {
+		cmd = 0 // SW_HIDE
+	}
+	procShowWindow.Call(mw.hList, cmd)
+	mw.layout()
+	procInvalidateRect.Call(mw.hBtnToggleList, 0, 0)
+	if !mw.connected {
+		if mw.listCollapsed {
+			mw.setStatus("Connection list collapsed.")
+		} else {
+			mw.setStatus("Connection list expanded.")
+		}
 	}
 }
 
@@ -630,7 +688,7 @@ func (mw *MainWindow) startConnect(target, identity string, port int) {
 	mw.connected = true
 	mw.setProfileFormVisible(false)
 	procShowWindow.Call(mw.hBtnDisconnect, 5) // SW_SHOW
-	mw.setStatus(fmt.Sprintf("Terminal server started for %s · forked process active", target))
+	mw.setStatus(fmt.Sprintf("Terminal server started for %s", target))
 }
 
 func (mw *MainWindow) stopConnect() {
@@ -709,6 +767,10 @@ func RunWithOptions(target, identity string, port int) error {
 		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
 		if int32(r) <= 0 {
 			break
+		}
+		if m.Message == wmKeyDown && m.WParam == vkF9 {
+			mw.toggleList()
+			continue
 		}
 		// If connected to terminal, let terminal process all keys directly
 		if mw.connected && mw.termView != nil {
