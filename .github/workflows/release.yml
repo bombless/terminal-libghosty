@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Zig 0.17.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $env:RUNNER_TEMP "zig.zip"
+          Invoke-WebRequest "https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip" -OutFile $zip
+          $root = Join-Path $env:RUNNER_TEMP "zig"
+          Expand-Archive $zip -DestinationPath $root
+          (Join-Path $root "zig-x86_64-windows-0.17.0") | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Cache Zig
+        uses: actions/cache@v6
+        with:
+          path: |
+            ghostty/.zig-cache
+            ghostty/zig-pkg
+          key: zig-0.17.0-${{ hashFiles('ghostty/build.zig.zon') }}
+
+      - name: Build ghostty-vt.dll
+        working-directory: ghostty
+        run: zig build -Demit-lib-vt -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast
+
+      - name: Build terminal-go.exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          go build -trimpath -ldflags="-s -w -H=windowsgui" -o dist/terminal-go.exe ./cmd/terminal-libghosty
+          Copy-Item ghostty/zig-out/bin/ghostty-vt.dll dist/ghostty-vt.dll
+          Copy-Item ghostty/LICENSE dist/LICENSE-ghostty
+
+      - name: Test
+        env:
+          GHOSTTY_VT_DLL: ${{ github.workspace }}/ghostty/zig-out/bin/ghostty-vt.dll
+        run: go test ./internal/terminal ./internal/ssh -count=1
+
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path dist/terminal-go.exe, dist/ghostty-vt.dll, dist/LICENSE-ghostty -DestinationPath terminal-go-windows-x64.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: terminal-go-windows-x64
+          path: |
+            dist/terminal-go.exe
+            dist/ghostty-vt.dll
+            dist/LICENSE-ghostty
+            terminal-go-windows-x64.zip
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/terminal-go.exe
+            dist/ghostty-vt.dll
+            dist/LICENSE-ghostty
+            terminal-go-windows-x64.zip
+          generate_release_notes: true
