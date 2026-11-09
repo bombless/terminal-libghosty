@@ -128,7 +128,12 @@ func (c *Context) Close() {
 	}
 }
 
-func (c *Context) CreateTextFormat(fontFamily string, fontSize float32) (uintptr, error) {
+const (
+	FontStyleNormal uint32 = 0 // DWRITE_FONT_STYLE_NORMAL
+	FontStyleItalic uint32 = 2 // DWRITE_FONT_STYLE_ITALIC
+)
+
+func (c *Context) CreateTextFormat(fontFamily string, fontSize float32, fontStyle uint32) (uintptr, error) {
 	wFont, err := syscall.UTF16PtrFromString(fontFamily)
 	if err != nil {
 		return 0, err
@@ -142,8 +147,8 @@ func (c *Context) CreateTextFormat(fontFamily string, fontSize float32) (uintptr
 		uintptr(unsafe.Pointer(wFont)),
 		0,   // fontCollection = NULL
 		400, // DWRITE_FONT_WEIGHT_NORMAL
-		0,   // DWRITE_FONT_STYLE_NORMAL
-		5,   // DWRITE_FONT_STRETCH_NORMAL
+		uintptr(fontStyle),
+		5, // DWRITE_FONT_STRETCH_NORMAL
 		fontSizeBits,
 		uintptr(unsafe.Pointer(wLocale)),
 		uintptr(unsafe.Pointer(&textFormat)),

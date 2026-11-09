@@ -23,7 +23,7 @@ func TestD2DContextAndRender(t *testing.T) {
 	}
 	defer ctx.Close()
 
-	textFormat, err := ctx.CreateTextFormat("Consolas", 15.0)
+	textFormat, err := ctx.CreateTextFormat("Consolas", 15.0, FontStyleNormal)
 	if err != nil {
 		t.Fatalf("CreateTextFormat failed: %v", err)
 	}

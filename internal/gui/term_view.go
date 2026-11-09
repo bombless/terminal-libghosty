@@ -125,6 +125,54 @@ const (
 	iscShowUICompositionWindow = 0x80000000
 )
 
+// GhosttyStyleFlags bit positions, matching ghostty/src/terminal/c/style.zig.
+const (
+	styleItalic    uint32 = 1 << 1
+	styleFaint     uint32 = 1 << 2
+	styleInverse   uint32 = 1 << 4
+	styleInvisible uint32 = 1 << 5
+)
+
+var defaultBackground = d2d.Color{R: 15.0 / 255.0, G: 19.0 / 255.0, B: 26.0 / 255.0, A: 1.0}
+
+type cellPaint struct {
+	fg, bg    d2d.Color
+	fillBg    bool
+	textAlpha float32
+	italic    bool
+	hideText  bool
+}
+
+func rgbColor(c terminal.RGB) d2d.Color {
+	return d2d.Color{R: float32(c.R) / 255.0, G: float32(c.G) / 255.0, B: float32(c.B) / 255.0, A: 1.0}
+}
+
+// paintForCell resolves Ghostty's raw cell colors and style flags the way
+// Ghostty's own renderer does: faint halves glyph opacity, inverse swaps
+// foreground and background, and invisible suppresses the glyph.
+func paintForCell(cell terminal.Cell) cellPaint {
+	p := cellPaint{
+		fg:        rgbColor(cell.Foreground),
+		bg:        rgbColor(cell.Background),
+		fillBg:    cell.Background != (terminal.RGB{}),
+		textAlpha: 1.0,
+		italic:    cell.StyleFlags&styleItalic != 0,
+		hideText:  cell.StyleFlags&styleInvisible != 0,
+	}
+	if cell.StyleFlags&styleFaint != 0 {
+		p.textAlpha = 0.5
+	}
+	if cell.StyleFlags&styleInverse != 0 {
+		fg, bg := p.fg, p.bg
+		if !p.fillBg {
+			bg = defaultBackground
+		}
+		p.fg, p.bg = bg, fg
+		p.fillBg = true
+	}
+	return p
+}
+
 type wndClass struct {
 	Style                              uint32
 	WndProc                            uintptr
@@ -193,16 +241,17 @@ type drawItemStruct struct {
 }
 
 type TerminalView struct {
-	hwnd       uintptr
-	sess       *terminal.Session
-	d2dCtx     *d2d.Context
-	rt         *d2d.RenderTarget
-	brush      uintptr
-	textFormat uintptr
-	cellWidth  float32
-	cellHeight float32
-	cols       uint16
-	rows       uint16
+	hwnd           uintptr
+	sess           *terminal.Session
+	d2dCtx         *d2d.Context
+	rt             *d2d.RenderTarget
+	brush          uintptr
+	textFormat     uintptr
+	textFormatItal uintptr
+	cellWidth      float32
+	cellHeight     float32
+	cols           uint16
+	rows           uint16
 
 	frameReady  bool
 	frameCols   uint16
@@ -430,10 +479,17 @@ func NewTerminalView(parentHwnd uintptr, onExit func(code uint32)) (*TerminalVie
 		return nil, fmt.Errorf("init Direct2D: %w", err)
 	}
 
-	textFormat, err := ctx.CreateTextFormat("Consolas", 15.0)
+	textFormat, err := ctx.CreateTextFormat("Consolas", 15.0, d2d.FontStyleNormal)
 	if err != nil {
 		ctx.Close()
 		return nil, fmt.Errorf("create DirectWrite text format: %w", err)
+	}
+
+	textFormatItal, err := ctx.CreateTextFormat("Consolas", 15.0, d2d.FontStyleItalic)
+	if err != nil {
+		d2d.Release(textFormat)
+		ctx.Close()
+		return nil, fmt.Errorf("create DirectWrite italic text format: %w", err)
 	}
 
 	blinkInterval := 500 * time.Millisecond
@@ -444,6 +500,7 @@ func NewTerminalView(parentHwnd uintptr, onExit func(code uint32)) (*TerminalVie
 	tv := &TerminalView{
 		d2dCtx:             ctx,
 		textFormat:         textFormat,
+		textFormatItal:     textFormatItal,
 		cellWidth:          9.0,
 		cellHeight:         18.0,
 		cols:               80,
@@ -663,6 +720,10 @@ func (tv *TerminalView) cleanupD2D() {
 		d2d.Release(tv.textFormat)
 		tv.textFormat = 0
 	}
+	if tv.textFormatItal != 0 {
+		d2d.Release(tv.textFormatItal)
+		tv.textFormatItal = 0
+	}
 	if tv.d2dCtx != nil {
 		tv.d2dCtx.Close()
 		tv.d2dCtx = nil
@@ -765,13 +826,7 @@ func (tv *TerminalView) render() {
 
 	tv.rt.BeginDraw()
 
-	// Clear background: #0F131A (15, 19, 26)
-	tv.rt.Clear(d2d.Color{
-		R: 15.0 / 255.0,
-		G: 19.0 / 255.0,
-		B: 26.0 / 255.0,
-		A: 1.0,
-	})
+	tv.rt.Clear(defaultBackground)
 
 	if frameReady && len(cells) > 0 {
 		cw := tv.cellWidth
@@ -784,6 +839,7 @@ func (tv *TerminalView) render() {
 					continue
 				}
 				cell := cells[idx]
+				paint := paintForCell(cell)
 
 				cellRect := d2d.RectF{
 					Left:   float32(x) * cw,
@@ -801,34 +857,35 @@ func (tv *TerminalView) render() {
 						A: 1.0,
 					})
 					tv.rt.FillRectangle(cellRect, tv.brush)
-				} else if cell.Background.R != 0 || cell.Background.G != 0 || cell.Background.B != 0 {
-					d2d.SetBrushColor(tv.brush, d2d.Color{
-						R: float32(cell.Background.R) / 255.0,
-						G: float32(cell.Background.G) / 255.0,
-						B: float32(cell.Background.B) / 255.0,
-						A: 1.0,
-					})
+				} else if paint.fillBg {
+					d2d.SetBrushColor(tv.brush, paint.bg)
 					tv.rt.FillRectangle(cellRect, tv.brush)
 				}
 
 				// Cell text
 				end := uint64(cell.TextOffset) + uint64(cell.TextLength)
-				if cell.TextLength > 0 && end <= uint64(len(buf)) {
+				if !paint.hideText && cell.TextLength > 0 && end <= uint64(len(buf)) {
 					textStr := string(buf[cell.TextOffset:uint32(end)])
-					d2d.SetBrushColor(tv.brush, d2d.Color{
-						R: float32(cell.Foreground.R) / 255.0,
-						G: float32(cell.Foreground.G) / 255.0,
-						B: float32(cell.Foreground.B) / 255.0,
-						A: 1.0,
-					})
+					fg := paint.fg
+					fg.A = paint.textAlpha
+					d2d.SetBrushColor(tv.brush, fg)
+					format := tv.textFormat
+					right := float32(x+1) * cw
+					if paint.italic {
+						if tv.textFormatItal != 0 {
+							format = tv.textFormatItal
+						}
+						// Italic glyphs overhang their advance width.
+						right += 2.0
+					}
 					// DrawText with slight top padding for baseline centering
 					textRect := d2d.RectF{
 						Left:   float32(x) * cw,
 						Top:    float32(y)*ch + 1.0,
-						Right:  float32(x+1) * cw,
+						Right:  right,
 						Bottom: float32(y+1) * ch,
 					}
-					tv.rt.DrawText(textStr, tv.textFormat, textRect, tv.brush)
+					tv.rt.DrawText(textStr, format, textRect, tv.brush)
 				}
 			}
 		}
