@@ -299,6 +299,7 @@ func NewMainWindow() (*MainWindow, error) {
 		WndProc:    cb,
 		Background: bgBrush,
 		ClassName:  clsName,
+		Icon:       loadAppIcon(iconMetric(smCXIcon), iconMetric(smCYIcon)),
 		Cursor:     cursor,
 	}
 	procRegisterClassW.Call(uintptr(unsafe.Pointer(&wc)))
@@ -360,6 +361,7 @@ func NewMainWindow() (*MainWindow, error) {
 	}
 	mw.hwnd = hwnd
 	procSetWindowLongPtrW.Call(hwnd, uintptr(gwlpUserData), uintptr(unsafe.Pointer(mw)))
+	applyAppIcon(hwnd)
 
 	mw.createControls()
 	mw.loadAndRefreshProfiles()

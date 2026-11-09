@@ -15,6 +15,8 @@ func init() {
 }
 
 func main() {
+	prepareConsole()
+
 	var target, identity, shell string
 	var port int
 	var server bool
@@ -34,24 +36,24 @@ func main() {
 	flag.Parse()
 
 	if shell != "" && !strings.EqualFold(shell, "pwsh") && !strings.EqualFold(shell, "pwsh.exe") {
-		fmt.Fprintf(os.Stderr, "Unsupported shell %q: only pwsh is available\n", shell)
+		reportFatal("Unsupported shell %q: only pwsh is available", shell)
 		os.Exit(1)
 	}
 	if shell != "" && target != "" {
-		fmt.Fprintln(os.Stderr, "--shell and --ssh cannot be combined")
+		reportFatal("--shell and --ssh cannot be combined")
 		os.Exit(1)
 	}
 
 	if server {
 		if err := gui.RunHost(parent, target, identity, port, shell); err != nil {
-			fmt.Fprintf(os.Stderr, "Terminal server error: %v\n", err)
+			reportFatal("Terminal server error: %v", err)
 			os.Exit(1)
 		}
 		return
 	}
 
 	if err := gui.RunWithOptions(target, identity, port, shell); err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting terminal: %v\n", err)
+		reportFatal("Error starting terminal: %v", err)
 		os.Exit(1)
 	}
 }
