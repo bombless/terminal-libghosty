@@ -31,6 +31,7 @@ const (
 	ghosttyCellDataUTF8        = 9
 	ghosttyTerminalUser        = 1
 	ghosttyTerminalWrite       = 2
+	ghosttyTerminalKittyImageStorageLimit = 16
 	ghosttyTerminalSelection   = 22
 	ghosttyTerminalCursorBlink = 24
 	ghosttyPointTagActive      = 0
@@ -107,6 +108,30 @@ type ghosttyAPI struct {
 	renderNew, renderFree, renderUpdate, renderGet, renderClean           *ghosttyProc
 	rowIteratorNew, rowIteratorFree, rowIteratorNext, rowGet              *ghosttyProc
 	rowCellsNew, rowCellsFree, rowCellsNext, rowCellsGet                  *ghosttyProc
+	imageIteratorNew, imageIteratorFree                                   *ghosttyProc
+	extractImages                                                         func(render, terminal, iter uintptr) []RenderImage
+}
+
+type RenderImage struct {
+	ImageID     uint32
+	PlacementID uint32
+	Layer       uint32
+	Z           int32
+	Col         int32
+	Row         int32
+	GridCols    uint32
+	GridRows    uint32
+	OffsetX     uint32
+	OffsetY     uint32
+	Width       uint32
+	Height      uint32
+	SrcX        uint32
+	SrcY        uint32
+	SrcWidth    uint32
+	SrcHeight   uint32
+	ImgWidth    uint32
+	ImgHeight   uint32
+	Pixels      []byte
 }
 
 var (
@@ -138,9 +163,9 @@ func procBool(p *ghosttyProc, args ...uintptr) bool {
 }
 
 type ghosttyHost struct {
-	api                                 *ghosttyAPI
-	terminal, render, rowIter, rowCells uintptr
-	callbackID                          uintptr
+	api                                             *ghosttyAPI
+	terminal, render, rowIter, rowCells, imageIter uintptr
+	callbackID                                      uintptr
 }
 
 func newGhosttyHost(writeInput func([]byte)) (*ghosttyHost, error) {
@@ -162,10 +187,19 @@ func newGhosttyHost(writeInput func([]byte)) (*ghosttyHost, error) {
 	if int32(r) != ghosttySuccess || h.rowCells == 0 {
 		return fail(fmt.Errorf("ghostty_render_state_row_cells_new failed: %d", int32(r)))
 	}
+	if a.imageIteratorNew != nil {
+		r, _, _ = a.imageIteratorNew.Call(0, uintptr(unsafe.Pointer(&h.imageIter)))
+		if int32(r) != ghosttySuccess {
+			h.imageIter = 0
+		}
+	}
 	r, _, _ = a.terminalNew.Call(0, uintptr(unsafe.Pointer(&h.terminal)), 80, 24)
 	if int32(r) != ghosttySuccess || h.terminal == 0 {
 		return fail(fmt.Errorf("ghostty_terminal_new failed: %d", int32(r)))
 	}
+	storageLimit := uint64(64 * 1024 * 1024)
+	_, _, _ = a.terminalSet.Call(h.terminal, ghosttyTerminalKittyImageStorageLimit, uintptr(unsafe.Pointer(&storageLimit)))
+	runtime.KeepAlive(&storageLimit)
 	h.callbackID = uintptr(ghosttyCallbackID.Add(1))
 	ghosttyCallbacks.Store(h.callbackID, writeInput)
 	r, _, _ = a.terminalSet.Call(h.terminal, ghosttyTerminalUser, h.callbackID)
@@ -325,36 +359,41 @@ func (h *ghosttyHost) isMouseTracking() (bool, error) {
 }
 
 func (h *ghosttyHost) snapshot() (uint16, uint16, []Cell, []byte, Cursor, error) {
+	cols, rows, cells, text, cur, _, err := h.snapshotWithImages()
+	return cols, rows, cells, text, cur, err
+}
+
+func (h *ghosttyHost) snapshotWithImages() (uint16, uint16, []Cell, []byte, Cursor, []RenderImage, error) {
 	if h == nil || h.terminal == 0 || h.render == 0 {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty host is closed")
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty host is closed")
 	}
 	a := h.api
 	r, _, _ := a.renderUpdate.Call(h.render, h.terminal)
 	if int32(r) != ghosttySuccess {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty render update failed: %d", int32(r))
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty render update failed: %d", int32(r))
 	}
 	var cols, rows uint16
 	r, _, _ = a.renderGet.Call(h.render, ghosttyDataCols, uintptr(unsafe.Pointer(&cols)))
 	if int32(r) != ghosttySuccess {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty columns query failed: %d", int32(r))
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty columns query failed: %d", int32(r))
 	}
 	r, _, _ = a.renderGet.Call(h.render, ghosttyDataRows, uintptr(unsafe.Pointer(&rows)))
 	if int32(r) != ghosttySuccess || cols == 0 || rows == 0 {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty rows query failed: %d", int32(r))
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty rows query failed: %d", int32(r))
 	}
 	cur := ghosttyCursor{Size: unsafe.Sizeof(ghosttyCursor{})}
 	r, _, _ = a.renderGet.Call(h.render, ghosttyDataCursor, uintptr(unsafe.Pointer(&cur)))
 	if int32(r) != ghosttySuccess {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty cursor query failed: %d", int32(r))
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty cursor query failed: %d", int32(r))
 	}
 	colors := ghosttyColors{Size: unsafe.Sizeof(ghosttyColors{})}
 	r, _, _ = a.renderGet.Call(h.render, ghosttyDataColors, uintptr(unsafe.Pointer(&colors)))
 	if int32(r) != ghosttySuccess {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty colors query failed: %d", int32(r))
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty colors query failed: %d", int32(r))
 	}
 	r, _, _ = a.renderGet.Call(h.render, ghosttyDataRowIter, uintptr(unsafe.Pointer(&h.rowIter)))
 	if int32(r) != ghosttySuccess {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty row iterator query failed: %d", int32(r))
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty row iterator query failed: %d", int32(r))
 	}
 
 	count := int(cols) * int(rows)
@@ -363,36 +402,36 @@ func (h *ghosttyHost) snapshot() (uint16, uint16, []Cell, []byte, Cursor, error)
 	for procBool(a.rowIteratorNext, h.rowIter) {
 		r, _, _ = a.rowGet.Call(h.rowIter, ghosttyRowDataCells, uintptr(unsafe.Pointer(&h.rowCells)))
 		if int32(r) != ghosttySuccess {
-			return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty row cells query failed: %d", int32(r))
+			return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty row cells query failed: %d", int32(r))
 		}
 		for procBool(a.rowCellsNext, h.rowCells) {
 			buf := ghosttyBuffer{}
 			r, _, _ = a.rowCellsGet.Call(h.rowCells, ghosttyCellDataUTF8, uintptr(unsafe.Pointer(&buf)))
 			if int32(r) != ghosttyOutOfSpace && int32(r) != ghosttySuccess {
-				return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty grapheme sizing failed: %d", int32(r))
+				return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty grapheme sizing failed: %d", int32(r))
 			}
 			if buf.Len > uintptr(^uint32(0)) || total+uint64(buf.Len) > uint64(^uint32(0)) {
-				return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty snapshot exceeds 32-bit text offsets")
+				return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty snapshot exceeds 32-bit text offsets")
 			}
 			lengths = append(lengths, uint32(buf.Len))
 			total += uint64(buf.Len)
 		}
 	}
 	if len(lengths) != count {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty returned %d cells for %dx%d viewport", len(lengths), cols, rows)
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty returned %d cells for %dx%d viewport", len(lengths), cols, rows)
 	}
 	cells := make([]Cell, count)
 	text := make([]byte, int(total))
 	r, _, _ = a.renderGet.Call(h.render, ghosttyDataRowIter, uintptr(unsafe.Pointer(&h.rowIter)))
 	if int32(r) != ghosttySuccess {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("reset Ghostty row iterator failed: %d", int32(r))
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("reset Ghostty row iterator failed: %d", int32(r))
 	}
 	var offset uint32
 	index := 0
 	for procBool(a.rowIteratorNext, h.rowIter) {
 		r, _, _ = a.rowGet.Call(h.rowIter, ghosttyRowDataCells, uintptr(unsafe.Pointer(&h.rowCells)))
 		if int32(r) != ghosttySuccess {
-			return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty row cells query failed: %d", int32(r))
+			return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty row cells query failed: %d", int32(r))
 		}
 		for procBool(a.rowCellsNext, h.rowCells) {
 			c := &cells[index]
@@ -401,7 +440,7 @@ func (h *ghosttyHost) snapshot() (uint16, uint16, []Cell, []byte, Cursor, error)
 			var style ghosttyStyle
 			r, _, _ = a.rowCellsGet.Call(h.rowCells, ghosttyCellDataStyle, uintptr(unsafe.Pointer(&style)))
 			if int32(r) != ghosttySuccess {
-				return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty cell style query failed: %d", int32(r))
+				return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty cell style query failed: %d", int32(r))
 			}
 			c.StyleFlags = uint32(style.Flags)
 			c.Foreground = RGB{colors.Foreground.R, colors.Foreground.G, colors.Foreground.B}
@@ -411,34 +450,38 @@ func (h *ghosttyHost) snapshot() (uint16, uint16, []Cell, []byte, Cursor, error)
 			if int32(r) == ghosttySuccess {
 				c.Foreground = RGB{color.R, color.G, color.B}
 			} else if int32(r) != ghosttyNoValue {
-				return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty foreground query failed: %d", int32(r))
+				return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty foreground query failed: %d", int32(r))
 			}
 			r, _, _ = a.rowCellsGet.Call(h.rowCells, ghosttyCellDataBG, uintptr(unsafe.Pointer(&color)))
 			if int32(r) == ghosttySuccess {
 				c.Background = RGB{color.R, color.G, color.B}
 			} else if int32(r) != ghosttyNoValue {
-				return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty background query failed: %d", int32(r))
+				return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty background query failed: %d", int32(r))
 			}
 			var selected uint8
 			r, _, _ = a.rowCellsGet.Call(h.rowCells, ghosttyCellDataSel, uintptr(unsafe.Pointer(&selected)))
 			if int32(r) != ghosttySuccess {
-				return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty selection query failed: %d", int32(r))
+				return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty selection query failed: %d", int32(r))
 			}
 			c.Selected = selected
 			if c.TextLength > 0 {
 				buf := ghosttyBuffer{Ptr: uintptr(unsafe.Pointer(&text[int(offset)])), Cap: uintptr(c.TextLength)}
 				r, _, _ = a.rowCellsGet.Call(h.rowCells, ghosttyCellDataUTF8, uintptr(unsafe.Pointer(&buf)))
 				if int32(r) != ghosttySuccess || buf.Len != uintptr(c.TextLength) {
-					return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty grapheme copy failed: result=%d length=%d", int32(r), buf.Len)
+					return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty grapheme copy failed: result=%d length=%d", int32(r), buf.Len)
 				}
 			}
 			offset += c.TextLength
 			index++
 		}
 	}
+	var images []RenderImage
+	if a.extractImages != nil && h.imageIter != 0 {
+		images = a.extractImages(h.render, h.terminal, h.imageIter)
+	}
 	r, _, _ = a.renderClean.Call(h.render)
 	if int32(r) != ghosttySuccess {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("Ghostty render clean failed: %d", int32(r))
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("Ghostty render clean failed: %d", int32(r))
 	}
 	cursor := Cursor{X: cur.ViewportX, Y: cur.ViewportY, Visible: cur.Visible, Blinking: cur.Blinking, VisualStyle: uint8(cur.VisualStyle)}
 	if cur.ViewportHas == 0 {
@@ -448,7 +491,7 @@ func (h *ghosttyHost) snapshot() (uint16, uint16, []Cell, []byte, Cursor, error)
 	}
 	runtime.KeepAlive(cells)
 	runtime.KeepAlive(text)
-	return cols, rows, cells, text, cursor, nil
+	return cols, rows, cells, text, cursor, images, nil
 }
 
 func (h *ghosttyHost) destroy() {
@@ -460,6 +503,10 @@ func (h *ghosttyHost) destroy() {
 		h.callbackID = 0
 	}
 	if h.api != nil {
+		if h.imageIter != 0 && h.api.imageIteratorFree != nil {
+			h.api.imageIteratorFree.Call(h.imageIter)
+			h.imageIter = 0
+		}
 		if h.rowCells != 0 {
 			h.api.rowCellsFree.Call(h.rowCells)
 			h.rowCells = 0

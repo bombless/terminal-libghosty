@@ -59,6 +59,9 @@ func loadGhosttyAPI() (*ghosttyAPI, error) {
 			rowCellsFree:    find("ghostty_render_state_row_cells_free"),
 			rowCellsNext:    find("ghostty_render_state_row_cells_next"),
 			rowCellsGet:     find("ghostty_render_state_row_cells_get"),
+			imageIteratorNew: find("ghostty_render_state_image_iterator_new"),
+			imageIteratorFree: find("ghostty_render_state_image_iterator_free"),
+			extractImages:   func(render, terminal, iter uintptr) []RenderImage { return nil },
 		}
 		if gridRef := find("ghostty_terminal_grid_ref"); gridRef != nil {
 			// The C API takes GhosttyPoint by value. The Win64 ABI passes

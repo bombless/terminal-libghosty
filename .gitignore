@@ -1,5 +1,9 @@
 /build/
+/dist/
 *.exe
 *.dll
 *.lib
 *.a
+*.log
+/desktop/logs/
+/desktop/*.log

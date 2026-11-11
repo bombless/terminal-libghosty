@@ -265,3 +265,70 @@ func (rt *RenderTarget) CreateSolidColorBrush(initialColor Color) (uintptr, erro
 func SetBrushColor(brush uintptr, color Color) {
 	CallVtbl(brush, 8, uintptr(unsafe.Pointer(&color)))
 }
+
+type BitmapProperties struct {
+	PixelFormat PixelFormat
+	DpiX        float32
+	DpiY        float32
+}
+
+type Bitmap struct {
+	handle uintptr
+	width  uint32
+	height uint32
+}
+
+func (b *Bitmap) Handle() uintptr { return b.handle }
+func (b *Bitmap) Width() uint32   { return b.width }
+func (b *Bitmap) Height() uint32  { return b.height }
+func (b *Bitmap) Release() {
+	if b != nil && b.handle != 0 {
+		Release(b.handle)
+		b.handle = 0
+	}
+}
+
+func (rt *RenderTarget) CreateBitmap(width, height uint32, srcData []byte, pitch uint32) (*Bitmap, error) {
+	if width == 0 || height == 0 || len(srcData) == 0 {
+		return nil, fmt.Errorf("invalid bitmap dimensions or data")
+	}
+	props := BitmapProperties{
+		PixelFormat: PixelFormat{
+			Format:    28, // DXGI_FORMAT_R8G8B8A8_UNORM
+			AlphaMode: 1,  // D2D1_ALPHA_MODE_PREMULTIPLIED
+		},
+		DpiX: 96.0,
+		DpiY: 96.0,
+	}
+	size := uint64(width) | (uint64(height) << 32)
+	var bmp uintptr
+	hr := CallVtbl(
+		rt.handle,
+		4, // CreateBitmap
+		uintptr(size),
+		uintptr(unsafe.Pointer(&srcData[0])),
+		uintptr(pitch),
+		uintptr(unsafe.Pointer(&props)),
+		uintptr(unsafe.Pointer(&bmp)),
+	)
+	if hr != 0 {
+		return nil, fmt.Errorf("CreateBitmap failed: 0x%08X", uint32(hr))
+	}
+	return &Bitmap{handle: bmp, width: width, height: height}, nil
+}
+
+func (rt *RenderTarget) DrawBitmap(bitmap uintptr, destRect RectF, opacity float32, srcRect *RectF) {
+	if bitmap == 0 {
+		return
+	}
+	var srcPtr uintptr
+	if srcRect != nil {
+		srcPtr = uintptr(unsafe.Pointer(srcRect))
+	}
+	vtbl := *(*uintptr)(unsafe.Pointer(rt.handle))
+	proc := *(*uintptr)(unsafe.Pointer(vtbl + 26*unsafe.Sizeof(uintptr(0))))
+	opacityBits := uintptr(*(*uint32)(unsafe.Pointer(&opacity)))
+	callDrawBitmap(proc, rt.handle, bitmap, uintptr(unsafe.Pointer(&destRect)), opacityBits, 0, srcPtr)
+}
+
+func callDrawBitmap(proc, obj, bitmap, destRect, opacityBits, interpolationMode, srcRect uintptr) uintptr

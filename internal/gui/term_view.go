@@ -266,6 +266,8 @@ type TerminalView struct {
 	frameCells  []terminal.Cell
 	frameText   []byte
 	frameCursor terminal.Cursor
+	frameImages []terminal.RenderImage
+	bitmapCache map[uint32]*d2d.Bitmap
 
 	focused            bool
 	cursorBlinkVisible bool
@@ -437,7 +439,7 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 				}
 				if (c != tv.cols || rr != tv.rows) && tv.sess != nil {
 					tv.cols, tv.rows = c, rr
-					_ = tv.sess.Resize(c, rr)
+					_ = tv.sess.ResizeWithCellSize(c, rr, uint32(tv.cellWidth), uint32(tv.cellHeight))
 				}
 			}
 		}
@@ -454,7 +456,7 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		if tv != nil && tv.sess != nil && w <= 0x10FFFF {
 			tv.resetCursorBlink()
 			tv.scrollViewportBottom()
-			buf := []byte(string(rune(w)))
+			buf := encodeCharKey(w)
 			_ = tv.sess.Write(buf)
 		}
 		return 0
@@ -659,6 +661,7 @@ func NewTerminalView(parentHwnd uintptr, onExit func(code uint32)) (*TerminalVie
 		return nil, fmt.Errorf("CreateSolidColorBrush: %w", err)
 	}
 	tv.brush = brush
+	tv.bitmapCache = make(map[uint32]*d2d.Bitmap)
 
 	procSetTimer.Call(hwnd, 1, 25, 0)
 	return tv, nil
@@ -696,7 +699,7 @@ func (tv *TerminalView) AttachSession(sess *terminal.Session) {
 			rr = 1
 		}
 		tv.cols, tv.rows = c, rr
-		_ = sess.Resize(c, rr)
+		_ = sess.ResizeWithCellSize(c, rr, uint32(tv.cellWidth), uint32(tv.cellHeight))
 	}
 }
 
@@ -728,6 +731,22 @@ func (tv *TerminalView) Focus() {
 	tv.lastBlinkToggle = time.Now()
 	tv.mu.Unlock()
 	procSetFocus.Call(tv.hwnd)
+}
+
+// encodeCharKey translates a WM_CHAR parameter into bytes suitable for ConPTY / VT.
+// In Win32, Backspace generates WM_CHAR with w = 0x08 (ASCII BS) and Ctrl+Backspace
+// generates w = 0x7F (ASCII DEL). However, VT and ConPTY specify the opposite:
+// 0x7F is regular Backspace (VK_BACK with no modifiers), while 0x08 is Ctrl+Backspace
+// (VK_BACK with LEFT_CTRL_PRESSED, which triggers PSReadLine's BackwardKillWord).
+func encodeCharKey(w uintptr) []byte {
+	switch w {
+	case 0x08: // VK_BACK in Win32 WM_CHAR -> VT standard DEL (0x7F) for regular Backspace
+		return []byte{0x7F}
+	case 0x7F: // Ctrl+Backspace in Win32 WM_CHAR -> VT 0x08 for Ctrl+Backspace
+		return []byte{0x08}
+	default:
+		return []byte(string(rune(w)))
+	}
 }
 
 // cellFromLParam maps client-area pixels from a mouse message to a cell,
@@ -1102,6 +1121,10 @@ func (tv *TerminalView) cleanupD2D() {
 		d2d.Release(tv.brush)
 		tv.brush = 0
 	}
+	for _, bmp := range tv.bitmapCache {
+		bmp.Release()
+	}
+	tv.bitmapCache = nil
 	if tv.rt != nil {
 		tv.rt.Release()
 		tv.rt = nil
@@ -1143,12 +1166,28 @@ func (tv *TerminalView) pollState() {
 		}
 	}
 
-	cc, rr, cells, text, cursor, err := sess.Snapshot()
+	cc, rr, cells, text, cursor, images, err := sess.SnapshotWithImages()
 	if err != nil {
 		return
 	}
 
-	changed := !tv.frameReady || cc != tv.frameCols || rr != tv.frameRows || cursor != tv.frameCursor || !bytes.Equal(text, tv.frameText)
+	imagesChanged := len(images) != len(tv.frameImages)
+	if !imagesChanged {
+		for i := range images {
+			if images[i].ImageID != tv.frameImages[i].ImageID ||
+				images[i].Col != tv.frameImages[i].Col ||
+				images[i].Row != tv.frameImages[i].Row ||
+				images[i].Width != tv.frameImages[i].Width ||
+				images[i].Height != tv.frameImages[i].Height ||
+				images[i].OffsetX != tv.frameImages[i].OffsetX ||
+				images[i].OffsetY != tv.frameImages[i].OffsetY {
+				imagesChanged = true
+				break
+			}
+		}
+	}
+
+	changed := !tv.frameReady || cc != tv.frameCols || rr != tv.frameRows || cursor != tv.frameCursor || !bytes.Equal(text, tv.frameText) || imagesChanged
 	if !changed && len(cells) == len(tv.frameCells) {
 		for i := range cells {
 			if cells[i] != tv.frameCells[i] {
@@ -1187,6 +1226,7 @@ func (tv *TerminalView) pollState() {
 		tv.frameCells = cells
 		tv.frameText = text
 		tv.frameCursor = cursor
+		tv.frameImages = images
 		tv.frameReady = true
 		tv.cursorBlinkVisible = true
 		tv.lastBlinkToggle = now
@@ -1223,6 +1263,7 @@ func (tv *TerminalView) render() {
 	cursorVisible := tv.cursorBlinkVisible
 	focused := tv.focused
 	preedit := tv.preedit
+	images := tv.frameImages
 	sb := tv.frameScrollbar
 	scrollDragging := tv.scrollDragging
 	tv.mu.Unlock()
@@ -1235,6 +1276,7 @@ func (tv *TerminalView) render() {
 		cw := tv.cellWidth
 		ch := tv.cellHeight
 
+		// Pass 1: Cell backgrounds
 		for y := uint16(0); y < rr; y++ {
 			for x := uint16(0); x < cc; x++ {
 				idx := int(y)*int(cc) + int(x)
@@ -1251,7 +1293,6 @@ func (tv *TerminalView) render() {
 					Bottom: float32(y+1) * ch,
 				}
 
-				// Cell background
 				if cell.Selected != 0 {
 					d2d.SetBrushColor(tv.brush, d2d.Color{
 						R: float32(0x28) / 255.0,
@@ -1264,8 +1305,85 @@ func (tv *TerminalView) render() {
 					d2d.SetBrushColor(tv.brush, paint.bg)
 					tv.rt.FillRectangle(cellRect, tv.brush)
 				}
+			}
+		}
 
-				// Cell text
+		// Helper to draw image placements by layer
+		drawImages := func(aboveText bool) {
+			if len(images) == 0 {
+				return
+			}
+			for _, img := range images {
+				isAbove := img.Layer > 1
+				if isAbove != aboveText {
+					continue
+				}
+				if img.Width == 0 || img.Height == 0 || img.ImgWidth == 0 || img.ImgHeight == 0 {
+					continue
+				}
+				bmp, ok := tv.bitmapCache[img.ImageID]
+				if !ok || bmp.Width() != img.ImgWidth || bmp.Height() != img.ImgHeight {
+					if ok {
+						bmp.Release()
+						delete(tv.bitmapCache, img.ImageID)
+					}
+					if len(img.Pixels) < int(img.ImgWidth*img.ImgHeight*4) {
+						continue
+					}
+					newBmp, err := tv.rt.CreateBitmap(img.ImgWidth, img.ImgHeight, img.Pixels, img.ImgWidth*4)
+					if err != nil {
+						continue
+					}
+					bmp = newBmp
+					tv.bitmapCache[img.ImageID] = bmp
+				}
+
+				left := float32(img.Col)*cw + float32(img.OffsetX)
+				top := float32(img.Row)*ch + float32(img.OffsetY)
+				right := left + float32(img.Width)
+				bottom := top + float32(img.Height)
+				destRect := d2d.RectF{Left: left, Top: top, Right: right, Bottom: bottom}
+
+				var srcRect *d2d.RectF
+				if img.SrcWidth > 0 && img.SrcHeight > 0 {
+					r := d2d.RectF{
+						Left:   float32(img.SrcX),
+						Top:    float32(img.SrcY),
+						Right:  float32(img.SrcX + img.SrcWidth),
+						Bottom: float32(img.SrcY + img.SrcHeight),
+					}
+					srcRect = &r
+				}
+				tv.rt.DrawBitmap(bmp.Handle(), destRect, 1.0, srcRect)
+			}
+		}
+
+		if len(tv.bitmapCache) > 0 {
+			activeIDs := make(map[uint32]struct{}, len(images))
+			for _, img := range images {
+				activeIDs[img.ImageID] = struct{}{}
+			}
+			for id, bmp := range tv.bitmapCache {
+				if _, ok := activeIDs[id]; !ok {
+					bmp.Release()
+					delete(tv.bitmapCache, id)
+				}
+			}
+		}
+
+		// Pass 2: Images below text
+		drawImages(false)
+
+		// Pass 3: Cell text
+		for y := uint16(0); y < rr; y++ {
+			for x := uint16(0); x < cc; x++ {
+				idx := int(y)*int(cc) + int(x)
+				if idx >= len(cells) {
+					continue
+				}
+				cell := cells[idx]
+				paint := paintForCell(cell)
+
 				end := uint64(cell.TextOffset) + uint64(cell.TextLength)
 				if !paint.hideText && cell.TextLength > 0 && end <= uint64(len(buf)) {
 					textStr := string(buf[cell.TextOffset:uint32(end)])
@@ -1278,10 +1396,8 @@ func (tv *TerminalView) render() {
 						if tv.textFormatItal != 0 {
 							format = tv.textFormatItal
 						}
-						// Italic glyphs overhang their advance width.
 						right += 2.0
 					}
-					// DrawText with slight top padding for baseline centering
 					textRect := d2d.RectF{
 						Left:   float32(x) * cw,
 						Top:    float32(y)*ch + 1.0,
@@ -1292,6 +1408,9 @@ func (tv *TerminalView) render() {
 				}
 			}
 		}
+
+		// Pass 4: Images above text
+		drawImages(true)
 
 		// IME composition string drawn at the cursor cell.
 		if preedit != "" && cur.Y < rr {

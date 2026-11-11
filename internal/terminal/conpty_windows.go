@@ -242,7 +242,11 @@ func newConPTY(executable string, args []string, cols, rows uint16, onOutput fun
 	}
 
 	coord := uintptr(uint32(uint16(cols)) | uint32(uint16(rows))<<16)
-	hr, _, _ := procCreatePseudoConsole.Call(coord, uintptr(childInput), uintptr(childOutput), 0, uintptr(unsafe.Pointer(&s.pseudo)))
+	const pseudoConsolePassthrough = 0x00000008
+	hr, _, _ := procCreatePseudoConsole.Call(coord, uintptr(childInput), uintptr(childOutput), pseudoConsolePassthrough, uintptr(unsafe.Pointer(&s.pseudo)))
+	if int32(hr) < 0 {
+		hr, _, _ = procCreatePseudoConsole.Call(coord, uintptr(childInput), uintptr(childOutput), 0, uintptr(unsafe.Pointer(&s.pseudo)))
+	}
 	closeConPTYHandle(&childInput)
 	closeConPTYHandle(&childOutput)
 	if int32(hr) < 0 {

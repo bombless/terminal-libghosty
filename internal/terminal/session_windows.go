@@ -125,8 +125,18 @@ func (s *Session) Write(data []byte) error {
 }
 
 func (s *Session) Resize(cols, rows uint16) error {
+	return s.ResizeWithCellSize(cols, rows, 9, 18)
+}
+
+func (s *Session) ResizeWithCellSize(cols, rows uint16, cellW, cellH uint32) error {
 	if s == nil || cols == 0 || rows == 0 {
 		return fmt.Errorf("invalid terminal resize dimensions")
+	}
+	if cellW == 0 {
+		cellW = 9
+	}
+	if cellH == 0 {
+		cellH = 18
 	}
 	s.vtMu.Lock()
 	defer s.vtMu.Unlock()
@@ -140,7 +150,7 @@ func (s *Session) Resize(cols, rows uint16) error {
 	if err := p.Resize(cols, rows); err != nil {
 		return fmt.Errorf("resize ConPTY: %w", err)
 	}
-	if err := host.resize(cols, rows, 9, 18); err != nil {
+	if err := host.resize(cols, rows, cellW, cellH); err != nil {
 		return fmt.Errorf("resize Ghostty VT: %w", err)
 	}
 	return nil
@@ -307,19 +317,25 @@ func (s *Session) IsMouseTracking() (bool, error) {
 
 // Snapshot returns a caller-owned copy of Ghostty's rendered cell grid.
 func (s *Session) Snapshot() (uint16, uint16, []Cell, []byte, Cursor, error) {
+	cols, rows, cells, text, cur, _, err := s.SnapshotWithImages()
+	return cols, rows, cells, text, cur, err
+}
+
+// SnapshotWithImages returns a caller-owned copy of Ghostty's rendered cell grid and image placements.
+func (s *Session) SnapshotWithImages() (uint16, uint16, []Cell, []byte, Cursor, []RenderImage, error) {
 	if s == nil {
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("terminal session is closed")
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("terminal session is closed")
 	}
 	s.vtMu.Lock()
 	defer s.vtMu.Unlock()
 	s.mu.Lock()
 	if s.closing || s.ghostty == nil {
 		s.mu.Unlock()
-		return 0, 0, nil, nil, Cursor{}, fmt.Errorf("terminal session is closed")
+		return 0, 0, nil, nil, Cursor{}, nil, fmt.Errorf("terminal session is closed")
 	}
 	host := s.ghostty
 	s.mu.Unlock()
-	return host.snapshot()
+	return host.snapshotWithImages()
 }
 
 // SnapshotText returns the cell grid as UTF-8 text with CRLF row endings.

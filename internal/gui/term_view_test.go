@@ -156,3 +156,26 @@ func TestTerminalViewCopySelection(t *testing.T) {
 		}
 	}
 }
+
+func TestEncodeCharKeyBackspace(t *testing.T) {
+	// Regular Backspace in Win32 WM_CHAR is 0x08, must map to 0x7F for ConPTY/VT
+	if got := encodeCharKey(0x08); len(got) != 1 || got[0] != 0x7F {
+		t.Fatalf("encodeCharKey(0x08) = %v, want [0x7F]", got)
+	}
+
+	// Ctrl+Backspace in Win32 WM_CHAR is 0x7F, must map to 0x08 for ConPTY/VT
+	if got := encodeCharKey(0x7F); len(got) != 1 || got[0] != 0x08 {
+		t.Fatalf("encodeCharKey(0x7F) = %v, want [0x08]", got)
+	}
+
+	// Normal characters (ASCII and Unicode) must pass through unchanged
+	if got := encodeCharKey('a'); string(got) != "a" {
+		t.Fatalf("encodeCharKey('a') = %q, want %q", string(got), "a")
+	}
+	if got := encodeCharKey('\r'); string(got) != "\r" {
+		t.Fatalf("encodeCharKey('\\r') = %q, want %q", string(got), "\r")
+	}
+	if got := encodeCharKey('中'); string(got) != "中" {
+		t.Fatalf("encodeCharKey('中') = %q, want %q", string(got), "中")
+	}
+}

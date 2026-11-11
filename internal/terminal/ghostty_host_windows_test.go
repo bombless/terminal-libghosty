@@ -248,3 +248,54 @@ func TestGhosttyHostScrollingAndModes(t *testing.T) {
 		t.Fatalf("expected mouse tracking false after leaving, got isMouse=%v err=%v", isMouse, err)
 	}
 }
+
+func TestGhosttyHostKittyGraphicsPNG(t *testing.T) {
+	var replies []byte
+	host, err := newGhosttyHost(func(data []byte) {
+		replies = append(replies, data...)
+	})
+	if err != nil {
+		t.Fatalf("create host: %v", err)
+	}
+	defer host.destroy()
+
+	// 1. Probe test
+	if err := host.resize(80, 24, 9, 18); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	probe := []byte("\x1b_Gi=99,a=q,s=1,v=1,f=24,t=d;AAAA\x1b\\")
+	if err := host.feedOutput(probe); err != nil {
+		t.Fatalf("feed probe: %v", err)
+	}
+	if !bytes.Contains(replies, []byte("i=99;OK")) {
+		t.Fatalf("expected probe reply containing i=99;OK, got %q", string(replies))
+	}
+
+	// 2. Transmit 1x1 test PNG (embedded base64)
+	b64Png := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+	cmd := []byte("\x1b_Ga=T,f=100,t=d,i=1,c=2,r=1;" + b64Png + "\x1b\\")
+	if err := host.feedOutput(cmd); err != nil {
+		t.Fatalf("feed PNG cmd: %v", err)
+	}
+
+	cols, rows, _, _, _, images, err := host.snapshotWithImages()
+	if err != nil {
+		t.Fatalf("snapshotWithImages: %v", err)
+	}
+	if cols == 0 || rows == 0 {
+		t.Fatalf("invalid cols/rows: %dx%d", cols, rows)
+	}
+	if len(images) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(images))
+	}
+	img := images[0]
+	if img.ImageID != 1 {
+		t.Errorf("image ID = %d, want 1", img.ImageID)
+	}
+	if img.ImgWidth != 1 || img.ImgHeight != 1 {
+		t.Errorf("image dimensions = %dx%d, want 1x1", img.ImgWidth, img.ImgHeight)
+	}
+	if len(img.Pixels) != 4 {
+		t.Errorf("pixels length = %d, want 4", len(img.Pixels))
+	}
+}

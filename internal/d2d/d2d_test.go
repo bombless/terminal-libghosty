@@ -66,6 +66,19 @@ func TestD2DContextAndRender(t *testing.T) {
 	SetBrushColor(brush, Color{R: 0, G: 1, B: 0, A: 1})
 	rt.FillRectangle(RectF{Left: 10, Top: 10, Right: 50, Bottom: 50}, brush)
 	rt.DrawText("Hello D2D", textFormat, RectF{Left: 60, Top: 10, Right: 200, Bottom: 50}, brush)
+
+	pixels := make([]byte, 4*4*4)
+	for i := range pixels {
+		pixels[i] = 255
+	}
+	bmp, err := rt.CreateBitmap(4, 4, pixels, 16)
+	if err != nil {
+		t.Fatalf("CreateBitmap failed: %v", err)
+	}
+	defer bmp.Release()
+
+	rt.DrawBitmap(bmp.Handle(), RectF{Left: 10, Top: 60, Right: 50, Bottom: 100}, 1.0, nil)
+
 	if err := rt.EndDraw(); err != nil {
 		t.Fatalf("EndDraw failed: %v", err)
 	}
