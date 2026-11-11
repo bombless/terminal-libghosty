@@ -119,7 +119,7 @@ static int32_t tl_row_cells_get(uintptr_t cells, int32_t data, uintptr_t out) {
 	return (int32_t)ghostty_render_state_row_cells_get((GhosttyRenderStateRowCells)cells, (GhosttyRenderStateRowCellsData)data, (void*)out);
 }
 
-extern _Bool goDecodePng(uintptr_t allocator, uint8_t* data, size_t dataLen, void* out);
+extern __declspec(dllexport) _Bool goDecodePng(uintptr_t allocator, uint8_t* data, size_t dataLen, void* out);
 
 static bool tl_decode_png_bridge(void* userdata, const GhosttyAllocator* allocator, const uint8_t* data, size_t data_len, GhosttySysImage* out) {
 	(void)userdata;
