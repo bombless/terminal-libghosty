@@ -285,6 +285,7 @@ type TerminalView struct {
 	scrollDragging bool
 
 	skipNextCtrlC bool
+	skipNextCtrlV bool
 
 	processExited bool
 	onExit        func(code uint32)
@@ -451,7 +452,12 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 				tv.skipNextCtrlC = false
 				return 0
 			}
+			if tv.skipNextCtrlV && w == 0x16 {
+				tv.skipNextCtrlV = false
+				return 0
+			}
 			tv.skipNextCtrlC = false
+			tv.skipNextCtrlV = false
 		}
 		if tv != nil && tv.sess != nil && w <= 0x10FFFF {
 			tv.resetCursorBlink()
@@ -468,6 +474,24 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 			altState, _, _ := procGetKeyState.Call(0x12)  // VK_MENU = 0x12
 			isCtrl := (ctrlState & 0x8000) != 0
 			noAlt := (altState & 0x8000) == 0
+			if isCtrl && noAlt && w == 'V' {
+				// TranslateMessage has already queued the corresponding WM_CHAR;
+				// suppress it after delivering the clipboard contents as a paste.
+				tv.skipNextCtrlV = true
+				text, err := GetClipboardText(tv.hwnd)
+				if err != nil {
+					log.Printf("read clipboard for terminal paste: %v", err)
+					return 0
+				}
+				if text != "" {
+					tv.resetCursorBlink()
+					tv.scrollViewportBottom()
+					if err := tv.sess.Write([]byte(text)); err != nil {
+						log.Printf("paste clipboard into terminal: %v", err)
+					}
+				}
+				return 0
+			}
 			if isCtrl && noAlt && (w == 'C' || w == 0x43) {
 				if tv.CopySelection() {
 					tv.skipNextCtrlC = true
@@ -850,7 +874,7 @@ func (tv *TerminalView) handleMouseWheel(w, l uintptr) {
 	}
 
 	// Standard lines to scroll per mouse wheel tick (3 lines per 120 units)
-	lines := int(wheelDelta / 120) * 3
+	lines := int(wheelDelta/120) * 3
 	if lines == 0 {
 		if wheelDelta > 0 {
 			lines = 1

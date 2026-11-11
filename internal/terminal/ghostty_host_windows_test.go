@@ -4,6 +4,7 @@ package terminal
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 )
 
@@ -298,4 +299,61 @@ func TestGhosttyHostKittyGraphicsPNG(t *testing.T) {
 	if len(img.Pixels) != 4 {
 		t.Errorf("pixels length = %d, want 4", len(img.Pixels))
 	}
+}
+
+func TestSelectionAfterScroll(t *testing.T) {
+	host, err := newGhosttyHost(func([]byte) {})
+	if err != nil {
+		t.Fatalf("create host: %v", err)
+	}
+	defer host.destroy()
+
+	if err := host.resize(80, 24, 9, 18); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+
+	for i := 0; i < 60; i++ {
+		_ = host.feedOutput([]byte(fmt.Sprintf("line %02d\r\n", i)))
+	}
+
+	// Try to select the first line currently visible in the viewport (row 0)
+	if err := host.setSelection(0, 0, 6, 0); err != nil {
+		t.Fatalf("setSelection failed: %v", err)
+	}
+
+	cols, rows, cells, text, _, err := host.snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	selText := ExtractSelectedText(cols, rows, cells, text)
+	t.Logf("Selected text after 60 lines: %q", selText)
+
+	// Now scroll up 10 lines and try to select row 0
+	if err := host.scrollViewportDelta(-10); err != nil {
+		t.Fatalf("scroll: %v", err)
+	}
+	if err := host.setSelection(0, 0, 6, 0); err != nil {
+		t.Fatalf("setSelection while scrolled: %v", err)
+	}
+	cols, rows, cells, text, _, err = host.snapshot()
+	if err != nil {
+		t.Fatalf("snapshot 2: %v", err)
+	}
+	selTextScrolled := ExtractSelectedText(cols, rows, cells, text)
+	t.Logf("Selected text after scroll up 10: %q", selTextScrolled)
+
+	// Alternate screen test
+	if err := host.feedOutput([]byte("\x1b[?1049h")); err != nil {
+		t.Fatalf("feed alt screen: %v", err)
+	}
+	_ = host.feedOutput([]byte("alt screen text\r\n"))
+	if err := host.setSelection(0, 0, 9, 0); err != nil {
+		t.Fatalf("setSelection in alt screen: %v", err)
+	}
+	cols, rows, cells, text, _, err = host.snapshot()
+	if err != nil {
+		t.Fatalf("snapshot alt: %v", err)
+	}
+	selTextAlt := ExtractSelectedText(cols, rows, cells, text)
+	t.Logf("Selected text in alt screen: %q", selTextAlt)
 }
