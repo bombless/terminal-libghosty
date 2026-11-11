@@ -8,6 +8,7 @@ package terminal
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 #include "ghostty/vt.h"
 
 static int32_t tl_terminal_new(uintptr_t out, uint16_t cols, uint16_t rows) {
@@ -31,6 +32,22 @@ static void tl_terminal_vt_write(uintptr_t terminal, uintptr_t data, size_t len)
 
 static int32_t tl_terminal_resize(uintptr_t terminal, uint16_t cols, uint16_t rows, uint32_t cell_width, uint32_t cell_height) {
 	return (int32_t)ghostty_terminal_resize((GhosttyTerminal)terminal, cols, rows, cell_width, cell_height);
+}
+
+static int32_t tl_terminal_scroll_viewport(uintptr_t terminal, int32_t tag, intptr_t delta, size_t row) {
+	GhosttyTerminalScrollViewport behavior;
+	memset(&behavior, 0, sizeof(behavior));
+	behavior.tag = (GhosttyTerminalScrollViewportTag)tag;
+	if (tag == 2) {
+		behavior.value.delta = delta;
+	} else if (tag == 3) {
+		behavior.value.row = row;
+	}
+	return (int32_t)ghostty_terminal_scroll_viewport((GhosttyTerminal)terminal, behavior);
+}
+
+static int32_t tl_terminal_get(uintptr_t terminal, int32_t data, uintptr_t out) {
+	return (int32_t)ghostty_terminal_get((GhosttyTerminal)terminal, (GhosttyTerminalData)data, (void*)out);
 }
 
 static int32_t tl_terminal_grid_ref(uintptr_t terminal, int32_t tag, uint16_t x, uint32_t y, uintptr_t out) {
@@ -123,6 +140,12 @@ func loadGhosttyAPI() (*ghosttyAPI, error) {
 			}),
 			terminalResize: staticGhosttyProc(func(args ...uintptr) uintptr {
 				return uintptr(C.tl_terminal_resize(C.uintptr_t(args[0]), C.uint16_t(args[1]), C.uint16_t(args[2]), C.uint32_t(args[3]), C.uint32_t(args[4])))
+			}),
+			terminalScrollViewport: staticGhosttyProc(func(args ...uintptr) uintptr {
+				return uintptr(C.tl_terminal_scroll_viewport(C.uintptr_t(args[0]), C.int32_t(args[1]), C.intptr_t(args[2]), C.size_t(args[3])))
+			}),
+			terminalGet: staticGhosttyProc(func(args ...uintptr) uintptr {
+				return uintptr(C.tl_terminal_get(C.uintptr_t(args[0]), C.int32_t(args[1]), C.uintptr_t(args[2])))
 			}),
 			terminalGridRef: staticGhosttyProc(func(args ...uintptr) uintptr {
 				return uintptr(C.tl_terminal_grid_ref(C.uintptr_t(args[0]), C.int32_t(args[1]), C.uint16_t(args[2]), C.uint32_t(args[3]), C.uintptr_t(args[4])))

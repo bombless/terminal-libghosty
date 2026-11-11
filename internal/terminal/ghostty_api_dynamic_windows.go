@@ -11,6 +11,12 @@ import (
 	"unsafe"
 )
 
+type ghosttyScrollViewport struct {
+	Tag   int32
+	_     int32
+	Value [2]uint64
+}
+
 func loadGhosttyAPI() (*ghosttyAPI, error) {
 	ghosttyLoadOnce.Do(func() {
 		path, err := findGhosttyDLL()
@@ -71,6 +77,25 @@ func loadGhosttyAPI() (*ghosttyAPI, error) {
 				return r, 0, err
 			}}
 		}
+		if scrollViewport := find("ghostty_terminal_scroll_viewport"); scrollViewport != nil {
+			a.terminalScrollViewport = &ghosttyProc{call: func(args ...uintptr) (uintptr, uintptr, error) {
+				if unsafe.Sizeof(uintptr(0)) != 8 {
+					return ^uintptr(0), 0, fmt.Errorf("ghostty_terminal_scroll_viewport requires the Win64 ABI")
+				}
+				behavior := ghosttyScrollViewport{
+					Tag: int32(args[1]),
+				}
+				if args[1] == 2 {
+					behavior.Value[0] = uint64(int64(int(args[2])))
+				} else if args[1] == 3 {
+					behavior.Value[0] = uint64(args[3])
+				}
+				r, _, err := scrollViewport.Call(args[0], uintptr(unsafe.Pointer(&behavior)))
+				runtime.KeepAlive(&behavior)
+				return r, 0, err
+			}}
+		}
+		a.terminalGet = find("ghostty_terminal_get")
 		if ghosttyLoadErr == nil {
 			ghostty = a
 		} else {

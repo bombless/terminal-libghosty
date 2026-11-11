@@ -193,6 +193,118 @@ func (s *Session) ClearSelection() error {
 	return host.clearSelection()
 }
 
+func (s *Session) ScrollViewportDelta(delta int) error {
+	if s == nil {
+		return fmt.Errorf("terminal session is closed")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("terminal session is closed")
+	}
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.scrollViewportDelta(delta)
+}
+
+func (s *Session) ScrollViewportTop() error {
+	if s == nil {
+		return fmt.Errorf("terminal session is closed")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("terminal session is closed")
+	}
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.scrollViewportTop()
+}
+
+func (s *Session) ScrollViewportBottom() error {
+	if s == nil {
+		return fmt.Errorf("terminal session is closed")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("terminal session is closed")
+	}
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.scrollViewportBottom()
+}
+
+func (s *Session) ScrollViewportRow(row uint64) error {
+	if s == nil {
+		return fmt.Errorf("terminal session is closed")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("terminal session is closed")
+	}
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.scrollViewportRow(row)
+}
+
+func (s *Session) Scrollbar() (Scrollbar, error) {
+	if s == nil {
+		return Scrollbar{}, fmt.Errorf("terminal session is closed")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return Scrollbar{}, fmt.Errorf("terminal session is closed")
+	}
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.scrollbar()
+}
+
+func (s *Session) IsAlternateScreen() (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("terminal session is closed")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return false, fmt.Errorf("terminal session is closed")
+	}
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.isAlternateScreen()
+}
+
+func (s *Session) IsMouseTracking() (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("terminal session is closed")
+	}
+	s.vtMu.Lock()
+	defer s.vtMu.Unlock()
+	s.mu.Lock()
+	if s.closing || s.ghostty == nil {
+		s.mu.Unlock()
+		return false, fmt.Errorf("terminal session is closed")
+	}
+	host := s.ghostty
+	s.mu.Unlock()
+	return host.isMouseTracking()
+}
+
 // Snapshot returns a caller-owned copy of Ghostty's rendered cell grid.
 func (s *Session) Snapshot() (uint16, uint16, []Cell, []byte, Cursor, error) {
 	if s == nil {

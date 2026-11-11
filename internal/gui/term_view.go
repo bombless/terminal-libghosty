@@ -57,6 +57,7 @@ var (
 	procSelectObject             = g32.NewProc("SelectObject")
 	procGetCaretBlinkTime        = u32.NewProc("GetCaretBlinkTime")
 	procClientToScreen           = u32.NewProc("ClientToScreen")
+	procScreenToClient           = u32.NewProc("ScreenToClient")
 	procGetAncestor              = u32.NewProc("GetAncestor")
 	procSetCapture               = u32.NewProc("SetCapture")
 	procReleaseCapture           = u32.NewProc("ReleaseCapture")
@@ -94,6 +95,7 @@ const (
 	wmLButtonDown         = 0x201
 	wmLButtonUp           = 0x202
 	wmMouseMove           = 0x200
+	wmMouseWheel          = 0x020A
 	wmCaptureChanged      = 0x215
 	wmCommand             = 0x0111
 	wmCtlColorStatic      = 0x0138
@@ -277,6 +279,9 @@ type TerminalView struct {
 	selAnchorX, selAnchorY uint16
 	selLastX, selLastY     uint16
 
+	frameScrollbar terminal.Scrollbar
+	scrollDragging bool
+
 	processExited bool
 	onExit        func(code uint32)
 	mu            sync.Mutex
@@ -325,6 +330,7 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 	case wmImeChar:
 		if tv != nil && tv.sess != nil && w <= 0x10FFFF {
 			tv.resetCursorBlink()
+			tv.scrollViewportBottom()
 			_ = tv.sess.Write([]byte(string(rune(w))))
 		}
 		return 0
@@ -361,26 +367,48 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		procSetFocus.Call(hwnd)
 		procSetCapture.Call(hwnd)
 		if tv != nil {
-			tv.beginSelection(l)
+			if tv.hitScrollbar(l) {
+				tv.beginScrollDrag(l)
+			} else {
+				tv.beginSelection(l)
+			}
 		}
 		return 0
 
 	case wmMouseMove:
 		if tv != nil {
-			tv.updateSelection(l)
+			if tv.scrollDragging {
+				tv.updateScrollDrag(l)
+			} else {
+				tv.updateSelection(l)
+			}
 		}
 		return 0
 
 	case wmLButtonUp:
 		if tv != nil {
-			tv.endSelection()
+			if tv.scrollDragging {
+				tv.endScrollDrag()
+			} else {
+				tv.endSelection()
+			}
 		}
 		procReleaseCapture.Call()
 		return 0
 
 	case wmCaptureChanged:
 		if tv != nil {
-			tv.endSelection()
+			if tv.scrollDragging {
+				tv.endScrollDrag()
+			} else {
+				tv.endSelection()
+			}
+		}
+		return 0
+
+	case wmMouseWheel:
+		if tv != nil {
+			tv.handleMouseWheel(w, l)
 		}
 		return 0
 
@@ -416,6 +444,7 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 	case wmChar:
 		if tv != nil && tv.sess != nil && w <= 0x10FFFF {
 			tv.resetCursorBlink()
+			tv.scrollViewportBottom()
 			buf := []byte(string(rune(w)))
 			_ = tv.sess.Write(buf)
 		}
@@ -423,6 +452,27 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 
 	case wmKeyDown:
 		if tv != nil && tv.sess != nil {
+			shiftState, _, _ := procGetKeyState.Call(0x10) // VK_SHIFT = 0x10
+			if (shiftState & 0x8000) != 0 {
+				switch w {
+				case 0x21: // Shift+PageUp
+					tv.scrollViewportDelta(-int(tv.rows))
+					return 0
+				case 0x22: // Shift+PageDown
+					tv.scrollViewportDelta(int(tv.rows))
+					return 0
+				case 0x24: // Shift+Home
+					tv.scrollViewportTop()
+					return 0
+				case 0x23: // Shift+End
+					tv.scrollViewportBottom()
+					return 0
+				}
+			}
+
+			// When sending other keys, ensure viewport is at bottom
+			tv.scrollViewportBottom()
+
 			seq := ""
 			// Enter, Backspace, Tab and Esc already arrive as wmChar after
 			// TranslateMessage; mapping them here too would double every
@@ -605,6 +655,8 @@ func (tv *TerminalView) AttachSession(sess *terminal.Session) {
 	tv.frameReady = false
 	tv.frameCells = nil
 	tv.frameText = nil
+	tv.frameScrollbar = terminal.Scrollbar{}
+	tv.scrollDragging = false
 	tv.focused = true
 	tv.cursorBlinkVisible = true
 	tv.lastBlinkToggle = time.Now()
@@ -662,6 +714,10 @@ func (tv *TerminalView) Focus() {
 func (tv *TerminalView) cellFromLParam(l uintptr) (uint16, uint16) {
 	px := int(int16(uint16(l)))
 	py := int(int16(uint16(l >> 16)))
+	return tv.cellFromPixels(int32(px), int32(py))
+}
+
+func (tv *TerminalView) cellFromPixels(px, py int32) (uint16, uint16) {
 	x, y := 0, 0
 	if tv.cellWidth > 0 && tv.cellHeight > 0 {
 		x = int(float32(px) / tv.cellWidth)
@@ -688,6 +744,158 @@ func (tv *TerminalView) cellFromLParam(l uintptr) (uint16, uint16) {
 		y = maxY
 	}
 	return uint16(x), uint16(y)
+}
+
+func (tv *TerminalView) hitScrollbar(l uintptr) bool {
+	tv.mu.Lock()
+	sb := tv.frameScrollbar
+	totalW := float32(tv.frameCols) * tv.cellWidth
+	tv.mu.Unlock()
+	if sb.Total <= sb.Len {
+		return false
+	}
+	px := float32(int16(uint16(l)))
+	return px >= totalW-10.0 && px <= totalW
+}
+
+func (tv *TerminalView) beginScrollDrag(l uintptr) {
+	tv.scrollDragging = true
+	tv.updateScrollDrag(l)
+}
+
+func (tv *TerminalView) updateScrollDrag(l uintptr) {
+	if !tv.scrollDragging {
+		return
+	}
+	py := float32(int16(uint16(l >> 16)))
+	tv.mu.Lock()
+	sb := tv.frameScrollbar
+	totalH := float32(tv.frameRows) * tv.cellHeight
+	sess := tv.sess
+	tv.mu.Unlock()
+
+	if sb.Total <= sb.Len || totalH <= 0 || sess == nil {
+		return
+	}
+
+	maxOffset := float64(sb.Total - sb.Len)
+	ratio := float64(py / totalH)
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	targetRow := uint64(ratio * maxOffset)
+	_ = sess.ScrollViewportRow(targetRow)
+	tv.pollState()
+	procInvalidateRect.Call(tv.hwnd, 0, 0)
+}
+
+func (tv *TerminalView) endScrollDrag() {
+	tv.scrollDragging = false
+}
+
+func (tv *TerminalView) handleMouseWheel(w, l uintptr) {
+	tv.mu.Lock()
+	sess := tv.sess
+	tv.mu.Unlock()
+	if sess == nil {
+		return
+	}
+
+	wheelDelta := int16(uint16(w >> 16))
+	if wheelDelta == 0 {
+		return
+	}
+
+	// Standard lines to scroll per mouse wheel tick (3 lines per 120 units)
+	lines := int(wheelDelta / 120) * 3
+	if lines == 0 {
+		if wheelDelta > 0 {
+			lines = 1
+		} else {
+			lines = -1
+		}
+	}
+
+	isAlt, _ := sess.IsAlternateScreen()
+	isMouse, _ := sess.IsMouseTracking()
+
+	if isMouse {
+		pt := point{X: int32(int16(uint16(l))), Y: int32(int16(uint16(l >> 16)))}
+		procScreenToClient.Call(tv.hwnd, uintptr(unsafe.Pointer(&pt)))
+		col, row := tv.cellFromPixels(pt.X, pt.Y)
+		btn := 64
+		if wheelDelta < 0 {
+			btn = 65
+		}
+		seq := fmt.Sprintf("\x1b[<%d;%d;%dM", btn, col+1, row+1)
+		count := lines
+		if count < 0 {
+			count = -count
+		}
+		for i := 0; i < count; i++ {
+			_ = sess.Write([]byte(seq))
+		}
+		return
+	}
+
+	if isAlt {
+		_ = sess.ClearSelection()
+		seq := "\x1b[A" // Up
+		if wheelDelta < 0 {
+			seq = "\x1b[B" // Down
+		}
+		count := lines
+		if count < 0 {
+			count = -count
+		}
+		for i := 0; i < count; i++ {
+			_ = sess.Write([]byte(seq))
+		}
+		return
+	}
+
+	// Primary screen: scroll viewport
+	// In Ghostty VT, negative delta scrolls UP, positive delta scrolls DOWN.
+	delta := -lines
+	_ = sess.ScrollViewportDelta(delta)
+	tv.pollState()
+	procInvalidateRect.Call(tv.hwnd, 0, 0)
+}
+
+func (tv *TerminalView) scrollViewportDelta(delta int) {
+	tv.mu.Lock()
+	sess := tv.sess
+	tv.mu.Unlock()
+	if sess != nil {
+		_ = sess.ScrollViewportDelta(delta)
+		tv.pollState()
+		procInvalidateRect.Call(tv.hwnd, 0, 0)
+	}
+}
+
+func (tv *TerminalView) scrollViewportTop() {
+	tv.mu.Lock()
+	sess := tv.sess
+	tv.mu.Unlock()
+	if sess != nil {
+		_ = sess.ScrollViewportTop()
+		tv.pollState()
+		procInvalidateRect.Call(tv.hwnd, 0, 0)
+	}
+}
+
+func (tv *TerminalView) scrollViewportBottom() {
+	tv.mu.Lock()
+	sess := tv.sess
+	tv.mu.Unlock()
+	if sess != nil {
+		_ = sess.ScrollViewportBottom()
+		tv.pollState()
+		procInvalidateRect.Call(tv.hwnd, 0, 0)
+	}
 }
 
 func (tv *TerminalView) beginSelection(l uintptr) {
@@ -739,6 +947,7 @@ func (tv *TerminalView) handleComposition(l uintptr) {
 			tv.setPreedit("")
 			if sess != nil {
 				tv.resetCursorBlink()
+				tv.scrollViewportBottom()
 				_ = sess.Write([]byte(s))
 			}
 		}
@@ -897,7 +1106,18 @@ func (tv *TerminalView) pollState() {
 	}
 	tv.mu.Unlock()
 
-	if changed || blinkChanged {
+	sb, sbErr := sess.Scrollbar()
+	sbChanged := false
+	if sbErr == nil {
+		tv.mu.Lock()
+		if sb != tv.frameScrollbar {
+			tv.frameScrollbar = sb
+			sbChanged = true
+		}
+		tv.mu.Unlock()
+	}
+
+	if changed || blinkChanged || sbChanged {
 		procInvalidateRect.Call(tv.hwnd, 0, 0)
 	}
 }
@@ -916,6 +1136,8 @@ func (tv *TerminalView) render() {
 	cursorVisible := tv.cursorBlinkVisible
 	focused := tv.focused
 	preedit := tv.preedit
+	sb := tv.frameScrollbar
+	scrollDragging := tv.scrollDragging
 	tv.mu.Unlock()
 
 	tv.rt.BeginDraw()
@@ -1028,6 +1250,45 @@ func (tv *TerminalView) render() {
 				}
 				tv.rt.FillRectangle(cursorRect, tv.brush)
 			}
+		}
+
+		// Scrollbar indicator
+		if sb.Total > sb.Len && rr > 0 && cc > 0 {
+			scrollTrackWidth := float32(8.0)
+			totalW := float32(cc) * cw
+			totalH := float32(rr) * ch
+
+			trackRect := d2d.RectF{
+				Left:   totalW - scrollTrackWidth,
+				Top:    0,
+				Right:  totalW,
+				Bottom: totalH,
+			}
+			d2d.SetBrushColor(tv.brush, d2d.Color{R: 0.1, G: 0.1, B: 0.12, A: 0.4})
+			tv.rt.FillRectangle(trackRect, tv.brush)
+
+			viewRatio := float32(sb.Len) / float32(sb.Total)
+			thumbH := viewRatio * totalH
+			if thumbH < 18.0 {
+				thumbH = 18.0
+			}
+			maxOffset := float32(sb.Total - sb.Len)
+			thumbTop := float32(0)
+			if maxOffset > 0 {
+				thumbTop = (float32(sb.Offset) / maxOffset) * (totalH - thumbH)
+			}
+			thumbRect := d2d.RectF{
+				Left:   totalW - scrollTrackWidth + 1.0,
+				Top:    thumbTop,
+				Right:  totalW - 1.0,
+				Bottom: thumbTop + thumbH,
+			}
+			thumbColor := d2d.Color{R: 0.55, G: 0.58, B: 0.65, A: 0.6}
+			if scrollDragging {
+				thumbColor = d2d.Color{R: 0.75, G: 0.78, B: 0.85, A: 0.85}
+			}
+			d2d.SetBrushColor(tv.brush, thumbColor)
+			tv.rt.FillRectangle(thumbRect, tv.brush)
 		}
 	}
 

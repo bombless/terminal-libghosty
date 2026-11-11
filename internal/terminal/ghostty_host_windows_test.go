@@ -121,3 +121,122 @@ func TestGhosttyHostSelectionMarksCells(t *testing.T) {
 		t.Fatal("out-of-bounds selection should be rejected")
 	}
 }
+
+func TestGhosttyHostScrollingAndModes(t *testing.T) {
+	host, err := newGhosttyHost(func([]byte) {})
+	if err != nil {
+		t.Fatalf("create Ghostty host: %v", err)
+	}
+	defer host.destroy()
+
+	if err := host.resize(80, 24, 9, 18); err != nil {
+		t.Fatalf("resize host: %v", err)
+	}
+
+	sb, err := host.scrollbar()
+	if err != nil {
+		t.Fatalf("initial scrollbar: %v", err)
+	}
+	if sb.Len != 24 || sb.Total != 24 || sb.Offset != 0 {
+		t.Fatalf("unexpected initial scrollbar: %+v", sb)
+	}
+
+	// Feed 60 lines of text so scrollback is populated.
+	var buf bytes.Buffer
+	for i := 1; i <= 60; i++ {
+		buf.WriteString("line ")
+		buf.WriteString(string(rune('0' + (i % 10))))
+		buf.WriteString(" content\r\n")
+	}
+	if err := host.feedOutput(buf.Bytes()); err != nil {
+		t.Fatalf("feed output: %v", err)
+	}
+
+	sb, err = host.scrollbar()
+	if err != nil {
+		t.Fatalf("scrollbar after lines: %v", err)
+	}
+	if sb.Total <= sb.Len {
+		t.Fatalf("expected scrollback total > len, got Total=%d, Len=%d", sb.Total, sb.Len)
+	}
+	bottomOffset := sb.Total - sb.Len
+	if sb.Offset != bottomOffset {
+		t.Fatalf("expected initial viewport at bottom offset=%d, got %d", bottomOffset, sb.Offset)
+	}
+
+	// Scroll up 5 lines
+	if err := host.scrollViewportDelta(-5); err != nil {
+		t.Fatalf("scroll delta -5: %v", err)
+	}
+	sb, err = host.scrollbar()
+	if err != nil {
+		t.Fatalf("scrollbar after scroll: %v", err)
+	}
+	if sb.Offset != bottomOffset-5 {
+		t.Fatalf("expected offset %d, got %d", bottomOffset-5, sb.Offset)
+	}
+
+	// Scroll to top
+	if err := host.scrollViewportTop(); err != nil {
+		t.Fatalf("scroll top: %v", err)
+	}
+	sb, err = host.scrollbar()
+	if err != nil {
+		t.Fatalf("scrollbar after scroll top: %v", err)
+	}
+	if sb.Offset != 0 {
+		t.Fatalf("expected offset 0 at top, got %d", sb.Offset)
+	}
+
+	// Scroll to bottom
+	if err := host.scrollViewportBottom(); err != nil {
+		t.Fatalf("scroll bottom: %v", err)
+	}
+	sb, err = host.scrollbar()
+	if err != nil {
+		t.Fatalf("scrollbar after scroll bottom: %v", err)
+	}
+	if sb.Offset != bottomOffset {
+		t.Fatalf("expected offset %d at bottom, got %d", bottomOffset, sb.Offset)
+	}
+
+	// Test alternate screen detection
+	isAlt, err := host.isAlternateScreen()
+	if err != nil || isAlt {
+		t.Fatalf("expected normal screen initially, got isAlt=%v err=%v", isAlt, err)
+	}
+	if err := host.feedOutput([]byte("\x1b[?1049h")); err != nil {
+		t.Fatalf("enter alternate screen: %v", err)
+	}
+	isAlt, err = host.isAlternateScreen()
+	if err != nil || !isAlt {
+		t.Fatalf("expected alternate screen after sequence, got isAlt=%v err=%v", isAlt, err)
+	}
+	if err := host.feedOutput([]byte("\x1b[?1049l")); err != nil {
+		t.Fatalf("leave alternate screen: %v", err)
+	}
+	isAlt, err = host.isAlternateScreen()
+	if err != nil || isAlt {
+		t.Fatalf("expected normal screen after leaving, got isAlt=%v err=%v", isAlt, err)
+	}
+
+	// Test mouse tracking detection
+	isMouse, err := host.isMouseTracking()
+	if err != nil || isMouse {
+		t.Fatalf("expected mouse tracking false initially, got isMouse=%v err=%v", isMouse, err)
+	}
+	if err := host.feedOutput([]byte("\x1b[?1000h")); err != nil {
+		t.Fatalf("enable mouse tracking: %v", err)
+	}
+	isMouse, err = host.isMouseTracking()
+	if err != nil || !isMouse {
+		t.Fatalf("expected mouse tracking true after sequence, got isMouse=%v err=%v", isMouse, err)
+	}
+	if err := host.feedOutput([]byte("\x1b[?1000l")); err != nil {
+		t.Fatalf("disable mouse tracking: %v", err)
+	}
+	isMouse, err = host.isMouseTracking()
+	if err != nil || isMouse {
+		t.Fatalf("expected mouse tracking false after leaving, got isMouse=%v err=%v", isMouse, err)
+	}
+}

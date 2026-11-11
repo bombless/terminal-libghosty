@@ -18,6 +18,9 @@ const (
 	ghosttyDataCols            = 1
 	ghosttyDataRows            = 2
 	ghosttyDataRowIter         = 4
+	ghosttyDataActiveScreen    = 6
+	ghosttyDataScrollbar       = 9
+	ghosttyDataMouseTracking   = 11
 	ghosttyDataCursor          = 18
 	ghosttyDataColors          = 19
 	ghosttyRowDataCells        = 3
@@ -31,7 +34,18 @@ const (
 	ghosttyTerminalSelection   = 22
 	ghosttyTerminalCursorBlink = 24
 	ghosttyPointTagActive      = 0
+
+	ghosttyTerminalScrollTop    = 0
+	ghosttyTerminalScrollBottom = 1
+	ghosttyTerminalScrollDelta  = 2
+	ghosttyTerminalScrollRow    = 3
 )
+
+type Scrollbar struct {
+	Total  uint64
+	Offset uint64
+	Len    uint64
+}
 
 type ghosttyRGB struct{ R, G, B uint8 }
 type ghosttyBuffer struct{ Ptr, Cap, Len uintptr }
@@ -89,7 +103,7 @@ func (p *ghosttyProc) Call(args ...uintptr) (uintptr, uintptr, error) {
 
 type ghosttyAPI struct {
 	terminalNew, terminalFree, terminalSet, terminalWrite, terminalResize *ghosttyProc
-	terminalGridRef                                                       *ghosttyProc
+	terminalGridRef, terminalScrollViewport, terminalGet                  *ghosttyProc
 	renderNew, renderFree, renderUpdate, renderGet, renderClean           *ghosttyProc
 	rowIteratorNew, rowIteratorFree, rowIteratorNext, rowGet              *ghosttyProc
 	rowCellsNew, rowCellsFree, rowCellsNext, rowCellsGet                  *ghosttyProc
@@ -228,6 +242,86 @@ func (h *ghosttyHost) clearSelection() error {
 		return fmt.Errorf("Ghostty selection clear failed: %d", int32(r))
 	}
 	return nil
+}
+
+func (h *ghosttyHost) scrollViewportDelta(delta int) error {
+	if h == nil || h.terminal == 0 || h.api == nil || h.api.terminalScrollViewport == nil {
+		return fmt.Errorf("Ghostty host is closed")
+	}
+	r, _, _ := h.api.terminalScrollViewport.Call(h.terminal, ghosttyTerminalScrollDelta, uintptr(delta), 0)
+	if int32(r) != ghosttySuccess {
+		return fmt.Errorf("ghostty_terminal_scroll_viewport delta failed: %d", int32(r))
+	}
+	return nil
+}
+
+func (h *ghosttyHost) scrollViewportTop() error {
+	if h == nil || h.terminal == 0 || h.api == nil || h.api.terminalScrollViewport == nil {
+		return fmt.Errorf("Ghostty host is closed")
+	}
+	r, _, _ := h.api.terminalScrollViewport.Call(h.terminal, ghosttyTerminalScrollTop, 0, 0)
+	if int32(r) != ghosttySuccess {
+		return fmt.Errorf("ghostty_terminal_scroll_viewport top failed: %d", int32(r))
+	}
+	return nil
+}
+
+func (h *ghosttyHost) scrollViewportBottom() error {
+	if h == nil || h.terminal == 0 || h.api == nil || h.api.terminalScrollViewport == nil {
+		return fmt.Errorf("Ghostty host is closed")
+	}
+	r, _, _ := h.api.terminalScrollViewport.Call(h.terminal, ghosttyTerminalScrollBottom, 0, 0)
+	if int32(r) != ghosttySuccess {
+		return fmt.Errorf("ghostty_terminal_scroll_viewport bottom failed: %d", int32(r))
+	}
+	return nil
+}
+
+func (h *ghosttyHost) scrollViewportRow(row uint64) error {
+	if h == nil || h.terminal == 0 || h.api == nil || h.api.terminalScrollViewport == nil {
+		return fmt.Errorf("Ghostty host is closed")
+	}
+	r, _, _ := h.api.terminalScrollViewport.Call(h.terminal, ghosttyTerminalScrollRow, 0, uintptr(row))
+	if int32(r) != ghosttySuccess {
+		return fmt.Errorf("ghostty_terminal_scroll_viewport row failed: %d", int32(r))
+	}
+	return nil
+}
+
+func (h *ghosttyHost) scrollbar() (Scrollbar, error) {
+	if h == nil || h.terminal == 0 || h.api == nil || h.api.terminalGet == nil {
+		return Scrollbar{}, fmt.Errorf("Ghostty host is closed")
+	}
+	var sb Scrollbar
+	r, _, _ := h.api.terminalGet.Call(h.terminal, ghosttyDataScrollbar, uintptr(unsafe.Pointer(&sb)))
+	if int32(r) != ghosttySuccess {
+		return Scrollbar{}, fmt.Errorf("ghostty_terminal_get scrollbar failed: %d", int32(r))
+	}
+	return sb, nil
+}
+
+func (h *ghosttyHost) isAlternateScreen() (bool, error) {
+	if h == nil || h.terminal == 0 || h.api == nil || h.api.terminalGet == nil {
+		return false, fmt.Errorf("Ghostty host is closed")
+	}
+	var screen int32
+	r, _, _ := h.api.terminalGet.Call(h.terminal, ghosttyDataActiveScreen, uintptr(unsafe.Pointer(&screen)))
+	if int32(r) != ghosttySuccess {
+		return false, fmt.Errorf("ghostty_terminal_get active_screen failed: %d", int32(r))
+	}
+	return screen == 1, nil
+}
+
+func (h *ghosttyHost) isMouseTracking() (bool, error) {
+	if h == nil || h.terminal == 0 || h.api == nil || h.api.terminalGet == nil {
+		return false, fmt.Errorf("Ghostty host is closed")
+	}
+	var tracking uint8
+	r, _, _ := h.api.terminalGet.Call(h.terminal, ghosttyDataMouseTracking, uintptr(unsafe.Pointer(&tracking)))
+	if int32(r) != ghosttySuccess {
+		return false, fmt.Errorf("ghostty_terminal_get mouse_tracking failed: %d", int32(r))
+	}
+	return tracking != 0, nil
 }
 
 func (h *ghosttyHost) snapshot() (uint16, uint16, []Cell, []byte, Cursor, error) {

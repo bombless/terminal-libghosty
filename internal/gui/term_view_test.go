@@ -51,3 +51,61 @@ func TestPaintForCellInvisible(t *testing.T) {
 		t.Fatal("invisible style does not hide text")
 	}
 }
+
+func TestTerminalViewCellFromPixels(t *testing.T) {
+	tv := &TerminalView{
+		cellWidth:  10.0,
+		cellHeight: 20.0,
+		cols:       80,
+		rows:       24,
+	}
+
+	x, y := tv.cellFromPixels(0, 0)
+	if x != 0 || y != 0 {
+		t.Fatalf("cell at 0,0: got %d,%d, want 0,0", x, y)
+	}
+
+	x, y = tv.cellFromPixels(25, 45)
+	if x != 2 || y != 2 {
+		t.Fatalf("cell at 25,45: got %d,%d, want 2,2", x, y)
+	}
+
+	// Clamping out-of-bounds
+	x, y = tv.cellFromPixels(-10, -5)
+	if x != 0 || y != 0 {
+		t.Fatalf("cell at -10,-5: got %d,%d, want 0,0", x, y)
+	}
+	x, y = tv.cellFromPixels(1000, 1000)
+	if x != 79 || y != 23 {
+		t.Fatalf("cell at 1000,1000: got %d,%d, want 79,23", x, y)
+	}
+}
+
+func TestTerminalViewHitScrollbar(t *testing.T) {
+	tv := &TerminalView{
+		cellWidth:      10.0,
+		cellHeight:     20.0,
+		cols:           80,
+		rows:           24,
+		frameCols:      80,
+		frameRows:      24,
+		frameScrollbar: terminal.Scrollbar{Total: 100, Len: 24, Offset: 76},
+	}
+
+	// Total width is 80 * 10 = 800. Scrollbar is rightmost 10px (790 - 800).
+	lParamInside := uintptr(795) | (uintptr(100) << 16)
+	if !tv.hitScrollbar(lParamInside) {
+		t.Fatal("expected hitScrollbar to be true for x=795")
+	}
+
+	lParamOutside := uintptr(780) | (uintptr(100) << 16)
+	if tv.hitScrollbar(lParamOutside) {
+		t.Fatal("expected hitScrollbar to be false for x=780")
+	}
+
+	// When no scrollback (Total <= Len)
+	tv.frameScrollbar = terminal.Scrollbar{Total: 24, Len: 24, Offset: 0}
+	if tv.hitScrollbar(lParamInside) {
+		t.Fatal("expected hitScrollbar to be false when no scrollback exists")
+	}
+}
