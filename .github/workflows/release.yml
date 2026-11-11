@@ -68,6 +68,9 @@ jobs:
           $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5c)
           if ($subsystem -ne 2) { throw "terminal-libghosty.exe is not a GUI subsystem binary (subsystem=$subsystem)" }
           Copy-Item ghostty/LICENSE dist/LICENSE-ghostty
+          if (Test-Path resources/conpty) {
+            Copy-Item resources/conpty/* dist/ -Force
+          }
 
       - name: Test
         env:
@@ -78,15 +81,14 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path dist/terminal-libghosty.exe, dist/LICENSE-ghostty -DestinationPath terminal-libghosty-windows-x64.zip
+        run: Compress-Archive -Path dist/* -DestinationPath terminal-libghosty-windows-x64.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
           name: terminal-libghosty-windows-x64
           path: |
-            dist/terminal-libghosty.exe
-            dist/LICENSE-ghostty
+            dist/*
             terminal-libghosty-windows-x64.zip
 
       - name: Publish release
@@ -94,7 +96,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            dist/terminal-libghosty.exe
-            dist/LICENSE-ghostty
+            dist/*
             terminal-libghosty-windows-x64.zip
           generate_release_notes: true

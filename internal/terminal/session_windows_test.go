@@ -259,9 +259,10 @@ func TestKittyScriptE2E(t *testing.T) {
 		t.Fatalf("Kitty image not found in scrollback or viewport. Current text:\n%s", text)
 	}
 
-	t.Logf("Found Kitty image! ImageID=%d, Col=%d, Row=%d, Width=%d, Height=%d, ImgWidth=%d, ImgHeight=%d, Pixels=%d bytes",
+	t.Logf("Found Kitty image! ImageID=%d, Col=%d, Row=%d, Width=%d, Height=%d, ImgWidth=%d, ImgHeight=%d, Pixels=%d bytes, Layer=%d, Z=%d, SrcX=%d, SrcY=%d, SrcWidth=%d, SrcHeight=%d",
 		foundImg.ImageID, foundImg.Col, foundImg.Row, foundImg.Width, foundImg.Height,
-		foundImg.ImgWidth, foundImg.ImgHeight, len(foundImg.Pixels))
+		foundImg.ImgWidth, foundImg.ImgHeight, len(foundImg.Pixels),
+		foundImg.Layer, foundImg.Z, foundImg.SrcX, foundImg.SrcY, foundImg.SrcWidth, foundImg.SrcHeight)
 
 	if foundImg.ImgWidth != 64 || foundImg.ImgHeight != 64 {
 		t.Errorf("expected 64x64 image, got %dx%d", foundImg.ImgWidth, foundImg.ImgHeight)
