@@ -351,6 +351,16 @@ func (s *Session) SnapshotText() (string, error) {
 	return out.String(), nil
 }
 
+// SelectedText returns the text currently selected in the terminal viewport,
+// or an empty string if no cells are selected.
+func (s *Session) SelectedText() (string, error) {
+	cols, rows, cells, text, _, err := s.Snapshot()
+	if err != nil {
+		return "", err
+	}
+	return ExtractSelectedText(cols, rows, cells, text), nil
+}
+
 func (s *Session) Close() {
 	if s == nil {
 		return

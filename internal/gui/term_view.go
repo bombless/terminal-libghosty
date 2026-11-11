@@ -282,6 +282,8 @@ type TerminalView struct {
 	frameScrollbar terminal.Scrollbar
 	scrollDragging bool
 
+	skipNextCtrlC bool
+
 	processExited bool
 	onExit        func(code uint32)
 	mu            sync.Mutex
@@ -442,6 +444,13 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 		return 0
 
 	case wmChar:
+		if tv != nil {
+			if tv.skipNextCtrlC && w == 3 {
+				tv.skipNextCtrlC = false
+				return 0
+			}
+			tv.skipNextCtrlC = false
+		}
 		if tv != nil && tv.sess != nil && w <= 0x10FFFF {
 			tv.resetCursorBlink()
 			tv.scrollViewportBottom()
@@ -452,6 +461,18 @@ func termViewWndProc(hwnd uintptr, m uint32, w, l uintptr) uintptr {
 
 	case wmKeyDown:
 		if tv != nil && tv.sess != nil {
+			// Ctrl+C with active selection copies text to clipboard instead of sending SIGINT
+			ctrlState, _, _ := procGetKeyState.Call(0x11) // VK_CONTROL = 0x11
+			altState, _, _ := procGetKeyState.Call(0x12)  // VK_MENU = 0x12
+			isCtrl := (ctrlState & 0x8000) != 0
+			noAlt := (altState & 0x8000) == 0
+			if isCtrl && noAlt && (w == 'C' || w == 0x43) {
+				if tv.CopySelection() {
+					tv.skipNextCtrlC = true
+					return 0
+				}
+			}
+
 			shiftState, _, _ := procGetKeyState.Call(0x10) // VK_SHIFT = 0x10
 			if (shiftState & 0x8000) != 0 {
 				switch w {
@@ -930,6 +951,72 @@ func (tv *TerminalView) updateSelection(l uintptr) {
 
 func (tv *TerminalView) endSelection() {
 	tv.selecting = false
+}
+
+func (tv *TerminalView) CopySelection() bool {
+	if tv == nil {
+		return false
+	}
+	text := tv.SelectedText()
+	if text == "" {
+		return false
+	}
+	if err := SetClipboardText(tv.hwnd, text); err != nil {
+		return false
+	}
+	tv.ClearSelection()
+	return true
+}
+
+func (tv *TerminalView) ClearSelection() {
+	if tv == nil {
+		return
+	}
+	tv.selecting = false
+	tv.mu.Lock()
+	sess := tv.sess
+	for i := range tv.frameCells {
+		tv.frameCells[i].Selected = 0
+	}
+	tv.mu.Unlock()
+	if sess != nil {
+		_ = sess.ClearSelection()
+	}
+	if tv.hwnd != 0 {
+		procInvalidateRect.Call(tv.hwnd, 0, 0)
+	}
+}
+
+func (tv *TerminalView) SelectedText() string {
+	if tv == nil {
+		return ""
+	}
+	tv.mu.Lock()
+	sess := tv.sess
+	hasSelected := false
+	for _, c := range tv.frameCells {
+		if c.Selected != 0 {
+			hasSelected = true
+			break
+		}
+	}
+	if hasSelected && tv.frameReady && len(tv.frameCells) == int(tv.frameCols)*int(tv.frameRows) {
+		text := terminal.ExtractSelectedText(tv.frameCols, tv.frameRows, tv.frameCells, tv.frameText)
+		tv.mu.Unlock()
+		if text != "" {
+			return text
+		}
+	} else {
+		tv.mu.Unlock()
+	}
+
+	if sess != nil {
+		text, err := sess.SelectedText()
+		if err == nil {
+			return text
+		}
+	}
+	return ""
 }
 
 func (tv *TerminalView) handleComposition(l uintptr) {

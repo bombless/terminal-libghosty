@@ -109,3 +109,50 @@ func TestTerminalViewHitScrollbar(t *testing.T) {
 		t.Fatal("expected hitScrollbar to be false when no scrollback exists")
 	}
 }
+
+func TestTerminalViewCopySelection(t *testing.T) {
+	tv := &TerminalView{
+		frameReady: true,
+		frameCols:  5,
+		frameRows:  2,
+		frameText:  []byte("helloWorld"),
+		frameCells: []terminal.Cell{
+			{TextOffset: 0, TextLength: 1, Selected: 1}, // 'h'
+			{TextOffset: 1, TextLength: 1, Selected: 1}, // 'e'
+			{TextOffset: 2, TextLength: 1, Selected: 1}, // 'l'
+			{TextOffset: 3, TextLength: 1, Selected: 1}, // 'l'
+			{TextOffset: 4, TextLength: 1, Selected: 1}, // 'o'
+			{TextOffset: 5, TextLength: 1, Selected: 0},
+			{TextOffset: 6, TextLength: 1, Selected: 0},
+			{TextOffset: 7, TextLength: 1, Selected: 0},
+			{TextOffset: 8, TextLength: 1, Selected: 0},
+			{TextOffset: 9, TextLength: 1, Selected: 0},
+		},
+	}
+
+	if got := tv.SelectedText(); got != "hello" {
+		t.Fatalf("SelectedText = %q, want %q", got, "hello")
+	}
+
+	if ok := tv.CopySelection(); !ok {
+		t.Fatal("CopySelection returned false")
+	}
+
+	clip, err := GetClipboardText(0)
+	if err != nil {
+		t.Fatalf("GetClipboardText: %v", err)
+	}
+	if clip != "hello" {
+		t.Fatalf("clipboard = %q, want %q", clip, "hello")
+	}
+
+	// After copying, selection must be cleared
+	if got := tv.SelectedText(); got != "" {
+		t.Fatalf("SelectedText after copy = %q, want empty", got)
+	}
+	for i, c := range tv.frameCells {
+		if c.Selected != 0 {
+			t.Fatalf("cell %d Selected = %d, want 0 after copy", i, c.Selected)
+		}
+	}
+}

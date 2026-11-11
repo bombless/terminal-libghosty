@@ -112,6 +112,14 @@ func TestGhosttyHostSelectionMarksCells(t *testing.T) {
 
 	assertSelected(true, true, true, true, true, false)
 
+	cols, rows, cells, text, _, err := host.snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if got := ExtractSelectedText(cols, rows, cells, text); got != "hello" {
+		t.Fatalf("ExtractSelectedText = %q, want %q", got, "hello")
+	}
+
 	if err := host.clearSelection(); err != nil {
 		t.Fatalf("clear selection: %v", err)
 	}
