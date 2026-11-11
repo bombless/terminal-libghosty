@@ -4,11 +4,14 @@ package terminal
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -28,9 +31,9 @@ var (
 	kernel32ConPTY                        = syscall.NewLazyDLL("kernel32.dll")
 	procCreatePipe                        = kernel32ConPTY.NewProc("CreatePipe")
 	procSetHandleInformation              = kernel32ConPTY.NewProc("SetHandleInformation")
-	procCreatePseudoConsole               = kernel32ConPTY.NewProc("CreatePseudoConsole")
-	procClosePseudoConsole                = kernel32ConPTY.NewProc("ClosePseudoConsole")
-	procResizePseudoConsole               = kernel32ConPTY.NewProc("ResizePseudoConsole")
+	procCreatePseudoConsole               = &conptyDynamicProc{name: "CreatePseudoConsole"}
+	procClosePseudoConsole                = &conptyDynamicProc{name: "ClosePseudoConsole"}
+	procResizePseudoConsole               = &conptyDynamicProc{name: "ResizePseudoConsole"}
 	procInitializeProcThreadAttributeList = kernel32ConPTY.NewProc("InitializeProcThreadAttributeList")
 	procUpdateProcThreadAttribute         = kernel32ConPTY.NewProc("UpdateProcThreadAttribute")
 	procDeleteProcThreadAttributeList     = kernel32ConPTY.NewProc("DeleteProcThreadAttributeList")
@@ -45,7 +48,85 @@ var (
 	procWaitForSingleObject               = kernel32ConPTY.NewProc("WaitForSingleObject")
 	procGetExitCodeProcess                = kernel32ConPTY.NewProc("GetExitCodeProcess")
 	procCloseHandle                       = kernel32ConPTY.NewProc("CloseHandle")
+	procCancelIoEx                        = kernel32ConPTY.NewProc("CancelIoEx")
+
+	conptyInitOnce  sync.Once
+	conptyDLLHandle syscall.Handle
+	conptyProcAddrs = make(map[string]uintptr)
 )
+
+type conptyDynamicProc struct {
+	name string
+}
+
+func (p *conptyDynamicProc) Call(a ...uintptr) (r1, r2 uintptr, lastErr error) {
+	ensureConPTYLoaded()
+	addr := conptyProcAddrs[p.name]
+	if addr == 0 {
+		return 0, 0, syscall.ERROR_PROC_NOT_FOUND
+	}
+	r1, r2, lastErr = syscall.SyscallN(addr, a...)
+	return
+}
+
+func ensureConPTYLoaded() {
+	conptyInitOnce.Do(func() {
+		var candidateDirs []string
+
+		// 1. Next to the executing binary
+		if exe, err := os.Executable(); err == nil {
+			candidateDirs = append(candidateDirs, filepath.Dir(exe))
+		}
+		// 2. Working directory and asset search paths
+		if wd, err := os.Getwd(); err == nil {
+			candidateDirs = append(candidateDirs,
+				wd,
+				filepath.Join(wd, "dist"),
+				filepath.Join(wd, "resources", "conpty"),
+				filepath.Join(wd, "..", "dist"),
+				filepath.Join(wd, "..", "resources", "conpty"),
+				filepath.Join(wd, "..", "..", "dist"),
+				filepath.Join(wd, "..", "..", "resources", "conpty"),
+			)
+		}
+		// 3. Known project root
+		candidateDirs = append(candidateDirs,
+			`D:\mcp-agent-workspace\terminal-libghosty\dist`,
+			`D:\mcp-agent-workspace\terminal-libghosty\resources\conpty`,
+		)
+
+		for _, dir := range candidateDirs {
+			dllPath := filepath.Join(dir, "conpty.dll")
+			exePath := filepath.Join(dir, "OpenConsole.exe")
+			if fi, err := os.Stat(exePath); err == nil && !fi.IsDir() {
+				if fiDll, err := os.Stat(dllPath); err == nil && !fiDll.IsDir() {
+					h, err := syscall.LoadLibrary(dllPath)
+					if err == nil {
+						pCreate, err1 := syscall.GetProcAddress(h, "CreatePseudoConsole")
+						pResize, err2 := syscall.GetProcAddress(h, "ResizePseudoConsole")
+						pClose, err3 := syscall.GetProcAddress(h, "ClosePseudoConsole")
+						if err1 == nil && err2 == nil && err3 == nil {
+							conptyDLLHandle = h
+							conptyProcAddrs["CreatePseudoConsole"] = pCreate
+							conptyProcAddrs["ResizePseudoConsole"] = pResize
+							conptyProcAddrs["ClosePseudoConsole"] = pClose
+							return
+						}
+						_ = syscall.FreeLibrary(h)
+					}
+				}
+			}
+		}
+
+		// Fallback to inbox kernel32.dll
+		for _, name := range []string{"CreatePseudoConsole", "ResizePseudoConsole", "ClosePseudoConsole"} {
+			proc := kernel32ConPTY.NewProc(name)
+			if err := proc.Find(); err == nil {
+				conptyProcAddrs[name] = proc.Addr()
+			}
+		}
+	})
+}
 
 type securityAttributes struct {
 	Length             uint32
@@ -334,21 +415,31 @@ func (s *conPTY) readOutput() {
 		if ok == 0 || read == 0 {
 			break
 		}
-		if s.onOutput != nil {
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if !closed && s.onOutput != nil {
 			chunk := append([]byte(nil), buf[:read]...)
 			s.onOutput(chunk)
 		}
 	}
-	// The C callback contract fires only after the output pipe reaches EOF.
-	procWaitForSingleObject.Call(uintptr(s.process), ^uintptr(0))
-	var code uint32
-	ok, _, _ := procGetExitCodeProcess.Call(uintptr(s.process), uintptr(unsafe.Pointer(&code)))
-	if ok != 0 {
-		s.mu.Lock()
-		s.exitCode, s.exitKnown = code, true
-		s.mu.Unlock()
-		if s.onExit != nil {
-			s.onExit(code)
+
+	s.mu.Lock()
+	process := s.process
+	onExit := s.onExit
+	s.mu.Unlock()
+
+	if process != 0 {
+		procWaitForSingleObject.Call(uintptr(process), 500)
+		var code uint32
+		ok, _, _ := procGetExitCodeProcess.Call(uintptr(process), uintptr(unsafe.Pointer(&code)))
+		if ok != 0 {
+			s.mu.Lock()
+			s.exitCode, s.exitKnown = code, true
+			s.mu.Unlock()
+			if onExit != nil {
+				onExit(code)
+			}
 		}
 	}
 }
@@ -440,8 +531,12 @@ func (s *conPTY) Close() {
 		return
 	}
 	s.closed = true
-	process, job, pseudo := s.process, s.job, s.pseudo
+	process, job, pseudo, output := s.process, s.job, s.pseudo, s.output
 	s.mu.Unlock()
+
+	s.writeMu.Lock()
+	closeConPTYHandle(&s.input)
+	s.writeMu.Unlock()
 
 	if process != 0 {
 		wait, _, _ := procWaitForSingleObject.Call(uintptr(process), 0)
@@ -451,17 +546,28 @@ func (s *conPTY) Close() {
 			} else {
 				procTerminateProcess.Call(uintptr(process), 1)
 			}
+			procWaitForSingleObject.Call(uintptr(process), 100)
 		}
 	}
 	if pseudo != 0 {
-		procClosePseudoConsole.Call(uintptr(pseudo))
+		go procClosePseudoConsole.Call(uintptr(pseudo))
 	}
-	<-s.readerDone
+
+	select {
+	case <-s.readerDone:
+	case <-time.After(200 * time.Millisecond):
+		if output != 0 {
+			procCancelIoEx.Call(uintptr(output), 0)
+		}
+		select {
+		case <-s.readerDone:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
-	closeConPTYHandle(&s.input)
 	closeConPTYHandle(&s.output)
 	closeConPTYHandle(&s.process)
 	closeConPTYHandle(&s.job)

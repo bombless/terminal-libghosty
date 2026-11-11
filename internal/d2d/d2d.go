@@ -316,19 +316,3 @@ func (rt *RenderTarget) CreateBitmap(width, height uint32, srcData []byte, pitch
 	}
 	return &Bitmap{handle: bmp, width: width, height: height}, nil
 }
-
-func (rt *RenderTarget) DrawBitmap(bitmap uintptr, destRect RectF, opacity float32, srcRect *RectF) {
-	if bitmap == 0 {
-		return
-	}
-	var srcPtr uintptr
-	if srcRect != nil {
-		srcPtr = uintptr(unsafe.Pointer(srcRect))
-	}
-	vtbl := *(*uintptr)(unsafe.Pointer(rt.handle))
-	proc := *(*uintptr)(unsafe.Pointer(vtbl + 26*unsafe.Sizeof(uintptr(0))))
-	opacityBits := uintptr(*(*uint32)(unsafe.Pointer(&opacity)))
-	callDrawBitmap(proc, rt.handle, bitmap, uintptr(unsafe.Pointer(&destRect)), opacityBits, 0, srcPtr)
-}
-
-func callDrawBitmap(proc, obj, bitmap, destRect, opacityBits, interpolationMode, srcRect uintptr) uintptr

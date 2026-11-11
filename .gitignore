@@ -5,5 +5,7 @@
 *.lib
 *.a
 *.log
+!resources/conpty/*.dll
+!resources/conpty/*.exe
 /desktop/logs/
 /desktop/*.log

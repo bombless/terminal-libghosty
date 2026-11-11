@@ -202,3 +202,69 @@ func TestPowerShellSessionScrolling(t *testing.T) {
 		t.Fatalf("expected offset %d at bottom, got %d", sb.Total-sb.Len, sb.Offset)
 	}
 }
+
+func TestKittyScriptE2E(t *testing.T) {
+	s, err := Start("pwsh.exe", []string{"-NoLogo", "-NoProfile"}, 100, 30)
+	if err != nil {
+		t.Skipf("pwsh not available: %v", err)
+	}
+	defer s.Close()
+
+	// Wait for prompt
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		text, err := s.SnapshotText()
+		if err == nil && (strings.Contains(text, "PS") || strings.Contains(text, ">")) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Run test-kitty.ps1
+	if err := s.Write([]byte("& d:\\test-kitty.ps1\r\n")); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+
+	// Wait for test to execute and find Kitty images
+	deadline = time.Now().Add(10 * time.Second)
+	foundImage := false
+	var foundImg RenderImage
+
+	for time.Now().Before(deadline) {
+		// Try current viewport and scrolling through scrollback
+		sb, _ := s.Scrollbar()
+		total := sb.Total
+		if total < 30 {
+			total = 30
+		}
+
+		for offset := uint64(0); offset <= total-sb.Len; offset += 5 {
+			_ = s.ScrollViewportDelta(int(offset) - int(sb.Offset))
+			_, _, _, _, _, images, err := s.SnapshotWithImages()
+			if err == nil && len(images) > 0 {
+				foundImage = true
+				foundImg = images[0]
+				break
+			}
+		}
+		if foundImage {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if !foundImage {
+		_ = s.ScrollViewportBottom()
+		text, _ := s.SnapshotText()
+		t.Fatalf("Kitty image not found in scrollback or viewport. Current text:\n%s", text)
+	}
+
+	t.Logf("Found Kitty image! ImageID=%d, Col=%d, Row=%d, Width=%d, Height=%d, ImgWidth=%d, ImgHeight=%d, Pixels=%d bytes",
+		foundImg.ImageID, foundImg.Col, foundImg.Row, foundImg.Width, foundImg.Height,
+		foundImg.ImgWidth, foundImg.ImgHeight, len(foundImg.Pixels))
+
+	if foundImg.ImgWidth != 64 || foundImg.ImgHeight != 64 {
+		t.Errorf("expected 64x64 image, got %dx%d", foundImg.ImgWidth, foundImg.ImgHeight)
+	}
+}
+

@@ -78,6 +78,8 @@ func TestD2DContextAndRender(t *testing.T) {
 	defer bmp.Release()
 
 	rt.DrawBitmap(bmp.Handle(), RectF{Left: 10, Top: 60, Right: 50, Bottom: 100}, 1.0, nil)
+	src := RectF{Left: 0, Top: 0, Right: 4, Bottom: 4}
+	rt.DrawBitmap(bmp.Handle(), RectF{Left: 60, Top: 60, Right: 100, Bottom: 100}, 0.8, &src)
 
 	if err := rt.EndDraw(); err != nil {
 		t.Fatalf("EndDraw failed: %v", err)

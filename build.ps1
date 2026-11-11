@@ -1,7 +1,12 @@
 # Build the Ghostty VT static library and link it into the single executable.
 $ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
 
-$zig = if ($env:ZIG) { (Get-Command $env:ZIG -ErrorAction Stop).Source } else { (Get-Command zig -ErrorAction Stop).Source }
+$knownZig = "D:\mcp-agent-workspace\tools\zig-0.17.0\zig-x86_64-windows-0.17.0\zig.exe"
+$zig = if ($env:ZIG) { (Get-Command $env:ZIG -ErrorAction Stop).Source }
+       elseif (Get-Command zig -ErrorAction SilentlyContinue) { (Get-Command zig).Source }
+       elseif (Test-Path $knownZig) { $knownZig }
+       else { throw "zig not found in PATH or at $knownZig" }
 
 Push-Location ghostty
 try {
@@ -23,9 +28,13 @@ if (-not $env:CC) {
 }
 go build -ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows" -o dist/terminal-libghosty.exe ./cmd/terminal-libghosty
 if ($LASTEXITCODE -ne 0) { throw "go build failed with exit code $LASTEXITCODE" }
-$bytes = [IO.File]::ReadAllBytes("dist/terminal-libghosty.exe")
+$distExe = Join-Path $PSScriptRoot "dist/terminal-libghosty.exe"
+$bytes = [IO.File]::ReadAllBytes($distExe)
 $pe = [BitConverter]::ToInt32($bytes, 0x3c)
 $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5c)
 if ($subsystem -ne 2) { throw "terminal-libghosty.exe is not a GUI subsystem binary (subsystem=$subsystem)" }
 Copy-Item ghostty/LICENSE dist/LICENSE-ghostty -Force
+if (Test-Path resources/conpty) {
+    Copy-Item resources/conpty/* dist/ -Force
+}
 Remove-Item dist/ghostty-vt.dll -ErrorAction SilentlyContinue

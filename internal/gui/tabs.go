@@ -211,6 +211,10 @@ func (mw *MainWindow) startSession(kind int, title string, sessionArgs []string,
 	args := append([]string{"--server", "--parent", fmt.Sprintf("0x%X", container)}, sessionArgs...)
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = filepath.Dir(exe)
+	if logFile, err := os.OpenFile(filepath.Join(filepath.Dir(exe), "server.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
 	if err := cmd.Start(); err != nil {
 		mw.removeTabAt(idx)
 		mw.setStatus(fmt.Sprintf("Failed to start terminal server: %v", err))

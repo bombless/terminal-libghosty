@@ -182,3 +182,44 @@ func TestConPTYCreateFailureCleansUp(t *testing.T) {
 		t.Fatal("expected missing executable to fail")
 	}
 }
+
+func TestConPTYKittyPassthrough(t *testing.T) {
+	var mu sync.Mutex
+	var output strings.Builder
+
+	pwshCmd := "[Console]::Out.Write([char]27 + '_Ga=T,f=100;PWSH7_TEST' + [char]27 + [char]92 + 'PWSH7_DONE'); exit 0"
+	s, err := newConPTY("pwsh.exe", []string{"-NoLogo", "-NoProfile", "-Command", pwshCmd}, 80, 24, func(p []byte) {
+		mu.Lock()
+		output.Write(p)
+		mu.Unlock()
+	}, nil)
+	if err != nil {
+		t.Fatalf("create ConPTY: %v", err)
+	}
+	defer s.Close()
+
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := output.String()
+		mu.Unlock()
+		if strings.Contains(got, "PWSH7_DONE") {
+			if !strings.Contains(got, "\x1b_Ga=T,f=100;PWSH7_TEST\x1b\\") {
+				t.Fatalf("Kitty APC sequence stripped! ConPTY output: %q", got)
+			}
+			t.Logf("Success! Found Kitty APC sequence in output: %q", got)
+			for time.Now().Before(deadline) {
+				if exited, _, _ := s.PollExit(); exited {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	got := output.String()
+	mu.Unlock()
+	t.Fatalf("Timeout waiting for child output. Current output: %q", got)
+}
