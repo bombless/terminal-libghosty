@@ -46,7 +46,12 @@ func StartSSH(options ssh.Options, cols, rows uint16) (*Session, error) {
 
 // StartPowerShell starts a local PowerShell 7 session (pwsh.exe) in ConPTY.
 func StartPowerShell(cols, rows uint16) (*Session, error) {
-	return Start("pwsh.exe", []string{"-NoLogo"}, cols, rows)
+	// A remote command passed to OpenSSH does not get a PTY by default. That
+	// breaks full-screen programs such as tview when launched from this shell.
+	// Define an app-local PowerShell function so `ssh host command` behaves like
+	// an interactive terminal, without changing the user's PowerShell profile.
+	sshWrapper := `function global:ssh { $ssh = Get-Command ssh.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1; & $ssh.Source -tt @args }`
+	return Start("pwsh.exe", []string{"-NoLogo", "-NoExit", "-Command", sshWrapper}, cols, rows)
 }
 
 func Start(executable string, args []string, cols, rows uint16) (*Session, error) {
